@@ -199,7 +199,7 @@ assign BUTTONS = 0;
 localparam [63:0] SS_VERSION = 64'(`BUILD_DATE);
 
 localparam CONF_STR = {
-    "IGSPGM;SS3E000000:400000;",
+    "IGSPGMPlus;SS3E000000:400000;",
     "-;",
     "P1,Video Settings;",
     "P1-,                    Digital;",

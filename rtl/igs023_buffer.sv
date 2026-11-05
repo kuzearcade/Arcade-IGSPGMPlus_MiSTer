@@ -90,7 +90,13 @@ assign wq_cur = wq_fifo0;
 
 wire valid_wr = (wr0 | wr1) && (column < 448 || &column);
 
+`ifdef ESPGALARR_CORE
+// (the espgalarr core's block RAM goes to its extra 68k RAM; the address-indexed A-ROM
+// cache keeps misses rare enough for a 1024-entry queue)
+localparam QUEUE_DEPTH = 10;
+`else
 localparam QUEUE_DEPTH = 12;
+`endif
 
 reg [QUEUE_DEPTH:0] write_queue_head = 0;
 reg [QUEUE_DEPTH:0] write_queue_tail = 0;
@@ -146,9 +152,16 @@ wire queue_valid = |write_queue_fifo_count;
 write_entry_t cmp_entry;
 reg           cmp_valid = 0;
 
-reg [7:0]  fill_sprite;
-reg [1:0]  fill_slot;
+// A-ROM colour cache: 2048 x 64-bit words, direct mapped by address (A-ROM word bits 12:2), so
+// sprites drawing the same graphics (bullets) share lines; tag = valid bit + the word's bits 24:13.
+reg [10:0] fill_index;
 reg [19:0] fill_tag;
+function automatic [10:0] cache_index(input arom_offset_t ofs);
+    cache_index = ofs.words[12:2];
+endfunction
+function automatic [19:0] cache_tag(input arom_offset_t ofs);
+    cache_tag = { 1'b1, 7'd0, ofs.words[24:13] };
+endfunction
 
 reg [31:0] ddr_cache_hits_frame   /* verilator public_flat */ = 0;
 reg [31:0] ddr_cache_misses_frame /* verilator public_flat */ = 0;
@@ -197,8 +210,8 @@ endfunction
 wire [19:0] tag_q_a,  tag_q_b;     // offset0 / offset1 tags
 wire [63:0] data_q_a, data_q_b;    // offset0 / offset1 64-bit colour words
 
-wire hit0 = (tag_q_a == cmp_entry.arom_offset0.words[23:4]);
-wire hit1 = (tag_q_b == cmp_entry.arom_offset1.words[23:4]);
+wire hit0 = (tag_q_a == cache_tag(cmp_entry.arom_offset0));
+wire hit1 = (tag_q_b == cache_tag(cmp_entry.arom_offset1));
 wire cmp_writable = (cmp_entry.line >= free_line_begin) && (cmp_entry.line < free_line_end);
 wire cmp_active   = cmp_valid && (queue_state == RUN) && cmp_writable;
 wire consume_now  = cmp_active &&  (hit0 && hit1);
@@ -233,16 +246,15 @@ wire present_valid = (queue_state == RUN) && ~miss_now && (fifo_count_next_c != 
 
 wire cache_fill_we = (queue_state == FETCH) && (arom_req == arom_ack);
 
-wire [9:0] cache_addr_a = cache_fill_we ? {fill_sprite, fill_slot}
-                                        : {present_entry.sprite_index, present_entry.arom_offset0.words[3:2]};
-wire [9:0] cache_addr_b = {present_entry.sprite_index, present_entry.arom_offset1.words[3:2]};
+wire [10:0] cache_addr_a = cache_fill_we ? fill_index : cache_index(present_entry.arom_offset0);
+wire [10:0] cache_addr_b = cache_index(present_entry.arom_offset1);
 
-dualport_ram_unreg #(.WIDTH(20), .WIDTHAD(10)) ddr_cache_tag (
+dualport_ram_unreg #(.WIDTH(20), .WIDTHAD(11)) ddr_cache_tag (
     .clock_a(clk), .wren_a(cache_fill_we), .address_a(cache_addr_a), .data_a(fill_tag),  .q_a(tag_q_a),
     .clock_b(clk), .wren_b(1'b0),          .address_b(cache_addr_b), .data_b(20'd0),     .q_b(tag_q_b)
 );
 
-dualport_ram_unreg #(.WIDTH(64), .WIDTHAD(10)) ddr_cache_data (
+dualport_ram_unreg #(.WIDTH(64), .WIDTHAD(11)) ddr_cache_data (
     .clock_a(clk), .wren_a(cache_fill_we), .address_a(cache_addr_a), .data_a(arom_data), .q_a(data_q_a),
     .clock_b(clk), .wren_b(1'b0),          .address_b(cache_addr_b), .data_b(64'd0),     .q_b(data_q_b)
 );
@@ -307,14 +319,12 @@ always_ff @(posedge clk) begin
                 // Miss: capture the missing word's slot/tag, kick the A-ROM fetch,
                 // and go FETCH; the entry stays at the FIFO head and is re-looked-up.
                 if (!hit0) begin
-                    fill_sprite  <= cmp_entry.sprite_index;
-                    fill_slot    <= cmp_entry.arom_offset0.words[3:2];
-                    fill_tag     <= cmp_entry.arom_offset0.words[23:4];
+                    fill_index   <= cache_index(cmp_entry.arom_offset0);
+                    fill_tag     <= cache_tag(cmp_entry.arom_offset0);
                     arom_address <= arom_word_addr(cmp_entry.arom_offset0);
                 end else begin
-                    fill_sprite  <= cmp_entry.sprite_index;
-                    fill_slot    <= cmp_entry.arom_offset1.words[3:2];
-                    fill_tag     <= cmp_entry.arom_offset1.words[23:4];
+                    fill_index   <= cache_index(cmp_entry.arom_offset1);
+                    fill_tag     <= cache_tag(cmp_entry.arom_offset1);
                     arom_address <= arom_word_addr(cmp_entry.arom_offset1);
                 end
                 arom_req <= ~arom_req;

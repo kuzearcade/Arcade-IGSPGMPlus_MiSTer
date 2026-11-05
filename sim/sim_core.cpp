@@ -276,7 +276,7 @@ void SimCore::DebugLinkTick()
         return;
 
     const uint32_t byteAddr = mTop->rootp->PGM_SIGNAL(cpu_word_addr) & DEBUG_LINK_ROM_MASK;
-    const uint8_t ds = mTop->rootp->PGM_SIGNAL(address_translator, cpu_ds_n);
+    const uint8_t ds = mTop->rootp->PGM_SIGNAL(cpu_ds_n);
     const bool lowByte = (ds & 1) == 0;
     const bool highByte = (ds & 2) == 0;
 

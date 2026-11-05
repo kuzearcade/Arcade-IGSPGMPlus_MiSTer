@@ -1,3 +1,4 @@
+#include <cstdint>
 #if !defined(IMGUI_WRAP_H)
 #define IMGUI_WRAP_H 1
 

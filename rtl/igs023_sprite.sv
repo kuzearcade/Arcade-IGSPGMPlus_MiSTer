@@ -41,6 +41,13 @@ module IGS023_Sprite(
     input      cpu_dtack_n,
     output reg [15:0] dma_addr,
     input      [15:0] dma_din,
+
+    // espgalarr extended sprite list (MAME igs023 set_extended_sprites): when the 256-entry
+    // main list has no terminator, the list continues with up to EXT_ENTRIES entries read
+    // from ext RAM (word address EXT_BASE.., 5 words an entry) until a terminator
+    input             ext_sprites,
+    output reg [14:0] ext_addr,
+    input      [15:0] ext_din,
     
     // ROM interface
     output reg [23:0] brom_address,
@@ -55,8 +62,14 @@ module IGS023_Sprite(
     input         arom_ack
 );
 
-typedef enum bit [4:0] {
+localparam int MAX_SPRITES = 1656;         // 256 main + 1400 extended (MAME espgalarr)
+localparam bit [14:0] EXT_BASE = 15'h6420;  // (0xd0c840 - 0xd00000) / 2
+
+typedef enum bit [5:0] {
     DMA_IDLE, DMA_BUS_REQUEST, DMA_READ0, DMA_READ1, DMA_READ2, DMA_READ3, DMA_FINISH,
+    DMA_EXT_START, DMA_EXT_ADDR, DMA_EXT_DATA,
+    PRESCAN_CLEAR, PRESCAN_START, PRESCAN_BUCKET,
+    DRAW_LINE_START, DRAW_LINE_PRIME, DRAW_PICK,
     PRESCAN_LOAD, PRESCAN_INITIAL_BROM, PRESCAN_INITIAL_BROM_WAIT, PRESCAN_INITIAL_NEXT,
     PRESCAN_NEXT, PRESCAN_SCAN_TO_START, PRESCAN_BROM_WAIT,
     DRAW_INIT, DRAW_LINE_WAIT, DRAW_SEARCH_ACTIVE_LOAD, DRAW_SEARCH_ACTIVE_CHECK,
@@ -109,14 +122,28 @@ endfunction
 
 dma_state_t dma_state = DMA_IDLE;
 reg [2:0] sprite_component_index;
-reg [8:0] sprite_index;
-reg [8:0] sprite_count /* verilator public_flat */;
+reg [10:0] sprite_index;
+reg [11:0] sprite_count /* verilator public_flat */;
 
-(* ramstyle = "M10K" *) reg [15:0] sprite_d0[256] /* verilator public_flat */;
-(* ramstyle = "M10K" *) reg [15:0] sprite_d1[256] /* verilator public_flat */;
-(* ramstyle = "M10K" *) reg [15:0] sprite_d2[256] /* verilator public_flat */;
-(* ramstyle = "M10K" *) reg [15:0] sprite_d3[256] /* verilator public_flat */;
-(* ramstyle = "M10K" *) reg [15:0] sprite_d4[256] /* verilator public_flat */;
+// Sprite list entries (5 words) and the per-sprite drawing state, in explicit block RAMs (the
+// list holds up to MAX_SPRITES entries).  Port A writes (the DMA / the state store), port B
+// reads: its address `spr_rd_idx` is presented the cycle before a LOAD state, so the entry is
+// on q during LOAD, where it is latched as the 256-entry arrays were.
+reg  [79:0] dma_entry;
+reg         sprite_wr;
+reg  [10:0] sprite_wr_idx;
+logic [10:0] spr_rd_idx;
+wire [79:0] sprite_q;
+
+dualport_ram_unreg #(.WIDTH(80), .WIDTHAD(11)) sprite_list_ram (
+    .clock_a(clk), .wren_a(sprite_wr), .address_a(sprite_wr_idx), .data_a(dma_entry), .q_a(),
+    .clock_b(clk), .wren_b(1'b0), .address_b(spr_rd_idx), .data_b(80'd0), .q_b(sprite_q)
+);
+wire [15:0] sprite_q0 = sprite_q[15:0];
+wire [15:0] sprite_q1 = sprite_q[31:16];
+wire [15:0] sprite_q2 = sprite_q[47:32];
+wire [15:0] sprite_q3 = sprite_q[63:48];
+wire [15:0] sprite_q4 = sprite_q[79:64];
 
 reg [10:0] spr_x;
 reg [9:0] spr_y;
@@ -184,7 +211,7 @@ singleport_ram #(.WIDTH(FLIP_CACHE_ENTRY_WIDTH), .WIDTHAD(8)) flip_cache_ram (
 );
 
 
-typedef struct
+typedef struct packed
 {
     bit [63:0]    brom_cache;
     bit [15:0]    brom_offset;
@@ -195,8 +222,60 @@ typedef struct
     bit           repeated;
 } volatile_sprite_state_t;
 
-volatile_sprite_state_t sprite_state[256];
 volatile_sprite_state_t spr, spr_saved;
+volatile_sprite_state_t sprite_state_q;
+wire spr_store;
+
+dualport_ram_unreg #(.WIDTH($bits(volatile_sprite_state_t)), .WIDTHAD(11)) sprite_state_ram (
+    .clock_a(clk), .wren_a(spr_store), .address_a(sprite_index), .data_a(spr), .q_a(),
+    .clock_b(clk), .wren_b(1'b0), .address_b(spr_rd_idx), .data_b('0), .q_b(sprite_state_q)
+);
+
+// Per-line draw lists.  The prescan files each visible sprite under its first screen line
+// (bucket heads `line_head`, links `line_next`; walked in descending index order, so each
+// bucket is ascending).  Each line merges the sprites still active from the previous line
+// (`active_list`, ping-pong halves) with the line's bucket, in index order (the order the
+// 256-entry search drew them in), so only the sprites on a line cost drawing time.
+reg [7:0]   draw_line;
+reg         list_parity;
+reg  [10:0] list_old_cnt, list_new_cnt, list_rd;
+reg  [10:0] a_cur, b_idx;
+reg         a_avail, b_valid;
+reg         adv_a, adv_b;
+reg  [7:0]  clear_idx;
+
+reg         head_we;
+reg  [7:0]  head_waddr;
+reg  [11:0] head_wdata;
+logic [7:0] head_raddr;
+wire [11:0] head_q;
+dualport_ram_unreg #(.WIDTH(12), .WIDTHAD(8)) line_head (
+    .clock_a(clk), .wren_a(head_we), .address_a(head_waddr), .data_a(head_wdata), .q_a(),
+    .clock_b(clk), .wren_b(1'b0), .address_b(head_raddr), .data_b(12'd0), .q_b(head_q)
+);
+
+reg         next_we;
+reg  [10:0] next_waddr;
+reg  [11:0] next_wdata;
+logic [10:0] next_raddr;
+wire [11:0] next_q;
+dualport_ram_unreg #(.WIDTH(12), .WIDTHAD(11)) line_next (
+    .clock_a(clk), .wren_a(next_we), .address_a(next_waddr), .data_a(next_wdata), .q_a(),
+    .clock_b(clk), .wren_b(1'b0), .address_b(next_raddr), .data_b(12'd0), .q_b(next_q)
+);
+
+reg         list_we;
+reg  [11:0] list_waddr;
+reg  [10:0] list_wdata;
+logic [11:0] list_raddr;
+wire [10:0] list_q;
+dualport_ram_unreg #(.WIDTH(11), .WIDTHAD(12)) active_list (
+    .clock_a(clk), .wren_a(list_we), .address_a(list_waddr), .data_a(list_wdata), .q_a(),
+    .clock_b(clk), .wren_b(1'b0), .address_b(list_raddr), .data_b(11'd0), .q_b(list_q)
+);
+
+wire take_a = a_avail && (!b_valid || a_cur < b_idx);
+wire take_b = !take_a && b_valid;
 
 wire [8:0] spr_y_end = spr_height - 9'd1;
 logic [4:0] spr_y_scale_idx;
@@ -291,7 +370,25 @@ always_comb begin
 end
 
 wire spr_load = dma_state == PRESCAN_LOAD || dma_state == DRAW_SEARCH_ACTIVE_LOAD;
-wire spr_store = dma_state == PRESCAN_NEXT || dma_state == DRAW_ROW_END;
+assign spr_store = dma_state == PRESCAN_NEXT || dma_state == DRAW_ROW_END;
+
+// read addresses for the next LOAD (see sprite_list_ram) and the list walks
+always_comb begin
+    spr_rd_idx = sprite_index;
+    head_raddr = spr.screen_line[7:0];
+    next_raddr = b_idx;
+    list_raddr = { list_parity, list_rd + 11'd1 };
+    case (dma_state)
+        PRESCAN_START:   spr_rd_idx = sprite_count[10:0] - 11'd1;
+        PRESCAN_BUCKET:  spr_rd_idx = sprite_index - 11'd1;
+        DRAW_PICK:       spr_rd_idx = take_a ? a_cur : b_idx;
+        DRAW_LINE_START: begin
+            head_raddr = draw_line;
+            list_raddr = { list_parity, 11'd0 };
+        end
+        default: begin end
+    endcase
+end
 
 function automatic [4:0] count_zeros4(input [3:0] v);
 begin
@@ -444,7 +541,6 @@ reg pixel_prio;
 reg [4:0] pixel_palette;
 reg [10:0] pixel_column;
 reg [10:0] pixel_next;
-reg [7:0] draw_line;
 reg [8:0] frame_draw_lines /* verilator public_flat */ = 0;
 arom_offset_t pixel0_offset, pixel1_offset;
 wire buffer_ready;
@@ -489,19 +585,22 @@ always_ff @(posedge clk) begin
             pixel_column <= spr_x + pixel_next;
         end
 
-        if (spr_load) begin
-            {spr_scale_x, spr_x} <= sprite_d0[sprite_index];
-            {spr_scale_y, tmp_1bit, spr_y} <= sprite_d1[sprite_index];
-            {spr_y_flip, spr_x_flip, spr_palette, spr_prio, spr_brom_addr[22:16]} <= sprite_d2[sprite_index][14:0];
-            spr_native_y_flip <= sprite_d2[sprite_index][14];
-            spr_brom_addr[15:0] <= sprite_d3[sprite_index];
-            {spr_width, spr_height} <= sprite_d4[sprite_index][14:0];
+        sprite_wr <= 0;
+        head_we <= 0;
+        next_we <= 0;
+        list_we <= 0;
 
-            spr <= sprite_state[sprite_index];
-            spr_saved <= sprite_state[sprite_index];
+        if (spr_load) begin
+            {spr_scale_x, spr_x} <= sprite_q0;
+            {spr_scale_y, tmp_1bit, spr_y} <= sprite_q1;
+            {spr_y_flip, spr_x_flip, spr_palette, spr_prio, spr_brom_addr[22:16]} <= sprite_q2[14:0];
+            spr_native_y_flip <= sprite_q2[14];
+            spr_brom_addr[15:0] <= sprite_q3;
+            {spr_width, spr_height} <= sprite_q4[14:0];
+
+            spr <= sprite_state_q;
+            spr_saved <= sprite_state_q;
             spr_load_d <= 1;
-        end else if (spr_store) begin
-            sprite_state[sprite_index] <= spr;
         end
 
         if (spr_load_d && !spr_load) begin
@@ -528,7 +627,8 @@ always_ff @(posedge clk) begin
                 // DMA was never triggered, skip the dma and go to prescan
                 if (frame_reset) begin
                     sprite_index <= 0;
-                    dma_state <= PRESCAN_LOAD;
+                    clear_idx <= 0;
+                    dma_state <= PRESCAN_CLEAR;
                 end
 
             end
@@ -548,23 +648,22 @@ always_ff @(posedge clk) begin
             DMA_READ1: dma_state <= DMA_READ2;
             DMA_READ2: dma_state <= DMA_READ3;
             DMA_READ3: begin
-                case(sprite_component_index)
-                    0: sprite_d0[sprite_index] <= dma_din;
-                    1: sprite_d1[sprite_index] <= dma_din;
-                    2: sprite_d2[sprite_index] <= dma_din;
-                    3: sprite_d3[sprite_index] <= dma_din;
-                    4: sprite_d4[sprite_index] <= dma_din;
-                    default: begin end
-                endcase
+                dma_entry[{ sprite_component_index, 4'd0 } +: 16] <= dma_din;
                 sprite_component_index <= sprite_component_index + 1;
                 dma_state <= DMA_READ0;
                 dma_addr <= dma_addr + 1;
 
                 if (sprite_component_index == 4) begin
+                    sprite_wr <= 1;
+                    sprite_wr_idx <= sprite_index;
                     if (~|dma_din[14:0]) begin // early out
+                        sprite_count <= { 1'b0, sprite_index };
                         dma_state <= DMA_FINISH;
                     end else if (sprite_index == 255) begin
-                        dma_state <= DMA_FINISH;
+                        // main list full: the extended list continues it (espgalarr); the
+                        // 256-entry hardware path keeps its 255 entries
+                        sprite_count <= ext_sprites ? 12'd256 : 12'd255;
+                        dma_state <= ext_sprites ? DMA_EXT_START : DMA_FINISH;
                     end else begin
                         sprite_component_index <= 0;
                         sprite_index <= sprite_index + 1;
@@ -572,20 +671,66 @@ always_ff @(posedge clk) begin
                 end
             end
 
+            // extended list over ext RAM port B; the 68k stays off the bus until the list is
+            // read, so it is taken whole as MAME takes it (the game may still be writing it)
+            DMA_EXT_START: begin
+                sprite_index <= 11'd256;
+                sprite_component_index <= 0;
+                ext_addr <= EXT_BASE;
+                dma_state <= DMA_EXT_ADDR;
+            end
+
+            DMA_EXT_ADDR: dma_state <= DMA_EXT_DATA;
+
+            DMA_EXT_DATA: begin
+                dma_entry[{ sprite_component_index, 4'd0 } +: 16] <= ext_din;
+                sprite_component_index <= sprite_component_index + 1;
+                ext_addr <= ext_addr + 1;
+                dma_state <= DMA_EXT_ADDR;
+                if (sprite_component_index == 4) begin
+                    sprite_wr <= 1;
+                    sprite_wr_idx <= sprite_index;
+                    sprite_component_index <= 0;
+                    if (~|ext_din[14:0]) begin
+                        sprite_count <= { 1'b0, sprite_index };
+                        dma_state <= DMA_FINISH;
+                    end else if (sprite_index == 11'(MAX_SPRITES - 1)) begin
+                        sprite_count <= 12'(MAX_SPRITES);
+                        dma_state <= DMA_FINISH;
+                    end else begin
+                        sprite_index <= sprite_index + 1;
+                    end
+                end
+            end
+
             DMA_FINISH: begin
                 cpu_bgack_n <= 1;
-                sprite_count <= sprite_index;
                 sprite_index <= 0;
                 flip_scan_active <= 0;
-                dma_state <= PRESCAN_LOAD;
+                clear_idx <= 0;
+                dma_state <= PRESCAN_CLEAR;
+            end
+
+            // empty the line buckets, then prescan the list from its last entry down
+            PRESCAN_CLEAR: begin
+                head_we <= 1;
+                head_waddr <= clear_idx;
+                head_wdata <= 12'd0;
+                clear_idx <= clear_idx + 1;
+                if (&clear_idx) dma_state <= PRESCAN_START;
+            end
+
+            PRESCAN_START: begin
+                if (sprite_count == 0) begin
+                    dma_state <= DRAW_INIT;
+                end else begin
+                    sprite_index <= sprite_count[10:0] - 11'd1;
+                    dma_state <= PRESCAN_LOAD;
+                end
             end
 
             PRESCAN_LOAD: begin
-                if (sprite_index == sprite_count) begin
-                    dma_state <= DRAW_INIT;
-                end else begin
-                    dma_state <= PRESCAN_INITIAL_BROM;
-                end
+                dma_state <= PRESCAN_INITIAL_BROM;
             end
 
             PRESCAN_INITIAL_BROM: begin
@@ -821,30 +966,83 @@ always_ff @(posedge clk) begin
             end
 
 
+            // the state is stored (spr_store); the line head read (head_raddr) is under way
             PRESCAN_NEXT: begin
-                sprite_index <= sprite_index + 1;
-                dma_state <= PRESCAN_LOAD;
+                dma_state <= PRESCAN_BUCKET;
+            end
+
+            // file a visible sprite at the head of its first line's bucket
+            PRESCAN_BUCKET: begin
+                if (spr.active && spr.screen_line < 10'd224) begin
+                    next_we <= 1;
+                    next_waddr <= sprite_index;
+                    next_wdata <= head_q;
+                    head_we <= 1;
+                    head_waddr <= spr.screen_line[7:0];
+                    head_wdata <= { 1'b1, sprite_index };
+                end
+                if (sprite_index == 0) begin
+                    dma_state <= DRAW_INIT;
+                end else begin
+                    sprite_index <= sprite_index - 11'd1;
+                    dma_state <= PRESCAN_LOAD;
+                end
             end
 
             DRAW_INIT: begin
                 sprite_index <= 0;
                 draw_line <= 0;
                 draw_complete <= 0;
-                dma_state <= DRAW_SEARCH_ACTIVE_LOAD;
+                list_parity <= 0;
+                list_old_cnt <= 0;
+                dma_state <= DRAW_LINE_START;
+            end
+
+            DRAW_LINE_START: begin
+                list_rd <= 0;
+                list_new_cnt <= 0;
+                dma_state <= DRAW_LINE_PRIME;
+            end
+
+            DRAW_LINE_PRIME: begin
+                b_valid <= head_q[11];
+                b_idx <= head_q[10:0];
+                a_cur <= list_q;
+                a_avail <= list_old_cnt != 0;
+                adv_a <= 0;
+                adv_b <= 0;
+                dma_state <= DRAW_PICK;
+            end
+
+            // next sprite of the line: the lower index of the carried list and the bucket
+            DRAW_PICK: begin
+                adv_a <= take_a;
+                adv_b <= take_b;
+                if (take_a) begin
+                    sprite_index <= a_cur;
+                    list_rd <= list_rd + 11'd1;
+                    dma_state <= DRAW_SEARCH_ACTIVE_LOAD;
+                end else if (take_b) begin
+                    sprite_index <= b_idx;
+                    dma_state <= DRAW_SEARCH_ACTIVE_LOAD;
+                end else begin
+                    list_old_cnt <= list_new_cnt;
+                    list_parity <= ~list_parity;
+                    draw_line <= draw_line + 1;
+                    dma_state <= (draw_line == 223) ? DMA_IDLE : DRAW_LINE_START;
+                end
             end
 
             DRAW_SEARCH_ACTIVE_LOAD: begin
-                if (sprite_index == sprite_count) begin
-                    draw_line <= draw_line + 1;
-                    sprite_index <= 0;
-                    if (draw_line == 223) begin
-                        dma_state <= DMA_IDLE;
-                    end else begin
-                        dma_state <= DRAW_SEARCH_ACTIVE_LOAD; // load correct sprite index
-                    end
-                end else begin
-                    dma_state <= DRAW_SEARCH_ACTIVE_CHECK;
+                if (adv_a) begin
+                    a_cur <= list_q;
+                    a_avail <= list_rd < list_old_cnt;
                 end
+                if (adv_b) begin
+                    b_valid <= next_q[11];
+                    b_idx <= next_q[10:0];
+                end
+                dma_state <= DRAW_SEARCH_ACTIVE_CHECK;
             end
 
             DRAW_SEARCH_ACTIVE_CHECK: begin
@@ -853,8 +1051,13 @@ always_ff @(posedge clk) begin
                     tmp_x <= 0;
                     pixel_next <= 0;
                 end else begin
-                    sprite_index <= sprite_index + 1;
-                    dma_state <= DRAW_SEARCH_ACTIVE_LOAD;
+                    if (spr.active && spr.screen_line > { 2'd0, draw_line }) begin
+                        list_we <= 1;
+                        list_waddr <= { ~list_parity, list_new_cnt };
+                        list_wdata <= sprite_index;
+                        list_new_cnt <= list_new_cnt + 11'd1;
+                    end
+                    dma_state <= DRAW_PICK;
                 end
             end
 
@@ -1075,9 +1278,15 @@ always_ff @(posedge clk) begin
                 end
             end
 
+            // the state is stored (spr_store); a sprite with rows left moves to the next line's list
             DRAW_ROW_END: begin
-                sprite_index <= sprite_index + 1;
-                dma_state <= DRAW_SEARCH_ACTIVE_LOAD;
+                if (spr.active) begin
+                    list_we <= 1;
+                    list_waddr <= { ~list_parity, list_new_cnt };
+                    list_wdata <= sprite_index;
+                    list_new_cnt <= list_new_cnt + 11'd1;
+                end
+                dma_state <= DRAW_PICK;
             end
 
             SKIP_ROW: begin

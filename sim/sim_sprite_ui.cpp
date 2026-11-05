@@ -41,24 +41,34 @@ PGM___024root *Root()
     return gSimCore.mTop ? gSimCore.mTop->rootp : nullptr;
 }
 
+// the sprite list lives in IGS023_Sprite's sprite_list_ram: 80-bit entries, word k at bits 16k+15..16k
+static uint16_t SpriteWord(PGM___024root *root, int index, int k)
+{
+    const auto &e = root->sim_top__DOT__pgm_inst__DOT__igs023__DOT__sprite__DOT__sprite_list_ram__DOT__ram[index];
+    const int bit = k * 16;
+    return static_cast<uint16_t>((e[bit / 32] >> (bit % 32)) & 0xffff);
+}
+
+static void SetSpriteWord(PGM___024root *root, int index, int k, uint16_t v)
+{
+    auto &e = root->sim_top__DOT__pgm_inst__DOT__igs023__DOT__sprite__DOT__sprite_list_ram__DOT__ram[index];
+    const int bit = k * 16;
+    e[bit / 32] = (e[bit / 32] & ~(0xffffu << (bit % 32))) | (uint32_t(v) << (bit % 32));
+}
+
 SpriteRecord ReadSprite(PGM___024root *root, int index)
 {
-    return {
-        static_cast<uint16_t>(root->sim_top__DOT__pgm_inst__DOT__igs023__DOT__sprite__DOT__sprite_d0[index]),
-        static_cast<uint16_t>(root->sim_top__DOT__pgm_inst__DOT__igs023__DOT__sprite__DOT__sprite_d1[index]),
-        static_cast<uint16_t>(root->sim_top__DOT__pgm_inst__DOT__igs023__DOT__sprite__DOT__sprite_d2[index]),
-        static_cast<uint16_t>(root->sim_top__DOT__pgm_inst__DOT__igs023__DOT__sprite__DOT__sprite_d3[index]),
-        static_cast<uint16_t>(root->sim_top__DOT__pgm_inst__DOT__igs023__DOT__sprite__DOT__sprite_d4[index]),
-    };
+    return {SpriteWord(root, index, 0), SpriteWord(root, index, 1), SpriteWord(root, index, 2),
+            SpriteWord(root, index, 3), SpriteWord(root, index, 4)};
 }
 
 void WriteSprite(PGM___024root *root, int index, const SpriteRecord &sprite)
 {
-    root->sim_top__DOT__pgm_inst__DOT__igs023__DOT__sprite__DOT__sprite_d0[index] = sprite.d0;
-    root->sim_top__DOT__pgm_inst__DOT__igs023__DOT__sprite__DOT__sprite_d1[index] = sprite.d1;
-    root->sim_top__DOT__pgm_inst__DOT__igs023__DOT__sprite__DOT__sprite_d2[index] = sprite.d2;
-    root->sim_top__DOT__pgm_inst__DOT__igs023__DOT__sprite__DOT__sprite_d3[index] = sprite.d3;
-    root->sim_top__DOT__pgm_inst__DOT__igs023__DOT__sprite__DOT__sprite_d4[index] = sprite.d4;
+    SetSpriteWord(root, index, 0, sprite.d0);
+    SetSpriteWord(root, index, 1, sprite.d1);
+    SetSpriteWord(root, index, 2, sprite.d2);
+    SetSpriteWord(root, index, 3, sprite.d3);
+    SetSpriteWord(root, index, 4, sprite.d4);
 }
 
 uint32_t BromAddress(const SpriteRecord &sprite)
