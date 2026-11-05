@@ -50,6 +50,34 @@ protected games will not run on this RBF. The sprite line-buffer queue is 1024 e
 Quartus 17.0 fit, 2026-11-05: 25,756 / 41,910 ALMs (61%) and 553 / 553 RAM blocks. Timing
 was met on every clock (worst setup slack +0.464 ns).
 
+## Clocks: 60 MHz system, 30 MHz 68k (espgalarr only)
+
+The arcade 68k (20 MHz) overruns its frame in busy scenes: MAME lags 23-38% of the frames in
+stages 2-6, the PS2 0.6-1.8%. The game paces itself on vblank, so a faster 68k only removes
+those lag frames; the logic per step is unchanged (MAME with the 68k scaled 1.5x and 2x gives
+the same bullet samples in stages 3-6 as at 1x).
+
+- **PLL:** clk_sys 60 MHz (was 50), SDRAM 120 MHz (was 100). fx68k takes one phase per clock,
+  so the 68k tops out at 30 MHz.
+- **ce_50m:** a 50 MHz enable (5 clocks in 6) that every other timing is derived from: pixel
+  clock, ICS2115, Z80, RTC, the IGS027A and the 20 MHz 68k of the other games.
+- **GAME_ESPGALARR:** the 68k runs unthrottled (30 MHz less SDRAM/DDR stalls).
+- **SDRAM controller:** 3 clocks ACTIVE->READ/WRITE (tRCD); 7 clocks READ->ACTIVE (tRP after
+  the auto-precharge); 6 clocks WRITE->ACTIVE; 9 clocks REFRESH->ACTIVE (tRFC).
+- **Timing fixes:** the sprite prescan registers the scaled height a state early
+  (PRESCAN_LOAD2); the ROM loader's SDRAM channel signals are registered.
+- **Fit (2026-11-05):** timing met at 60/120 MHz in every corner (worst setup +0.55 ns, hold
+  +0.13 ns), 553/553 RAM blocks.
+
+MAME lag at 1.5x (30 MHz): stages 2-6 2.9 / 4.0 / 10.1 / 9.4 / 10.5% (20 MHz: 30.9 / 23.1 / 33.1 /
+38.1 / 27.6%); at 2x (40 MHz): 1.0 / 1.7 / 6.2 / 3.9 / 4.1%.
+
+**40 MHz is not possible this way.**
+- fx68k alone fits at 125 MHz, so the CPU core is not the limit.
+- An 80 MHz system clock fails on about 2000 paths: sprite engine, ICS2115/Z80, the 68k's bus
+  decode, savestate and RAM.
+- 40 MHz would need fx68k in its own clock domain with a stalling, registered bus interface.
+
 ## Tested on the board (192.168.1.138, 2026-11-05)
 
 - **Boot:** the core boots to the attract demo with the Arrange title, HUD and sprites.
@@ -58,4 +86,7 @@ was met on every clock (worst setup slack +0.464 ns).
   `ESPGAL_FORCE_STAGE=5 ESPGAL_INVINCIBLE=1`) draws full screens of hundreds of bullets plus the
   boss and its parts. In the busy opening stretch the HUD disappears in some screenshots; MAME
   running the same ROM hides it in the same scenes, so this is the game's own behaviour.
+- **30 MHz core (60/120 MHz clocks):** boots and runs the attract loop.
+- **Enemy silhouettes:** solid black/blue silhouettes and garbled strips on some Arrange enemies (stage 1 demo, the stage 2 train) are
+  in MAME too, frame for frame: the conversion's ROM data, not the core.
 - **Not checked yet:** savestates, and audio over a long run.

@@ -70,7 +70,7 @@ typedef enum bit [5:0] {
     DMA_EXT_START, DMA_EXT_ADDR, DMA_EXT_DATA,
     PRESCAN_CLEAR, PRESCAN_START, PRESCAN_BUCKET,
     DRAW_LINE_START, DRAW_LINE_PRIME, DRAW_PICK,
-    PRESCAN_LOAD, PRESCAN_INITIAL_BROM, PRESCAN_INITIAL_BROM_WAIT, PRESCAN_INITIAL_NEXT,
+    PRESCAN_LOAD, PRESCAN_LOAD2, PRESCAN_INITIAL_BROM, PRESCAN_INITIAL_BROM_WAIT, PRESCAN_INITIAL_NEXT,
     PRESCAN_NEXT, PRESCAN_SCAN_TO_START, PRESCAN_BROM_WAIT,
     DRAW_INIT, DRAW_LINE_WAIT, DRAW_SEARCH_ACTIVE_LOAD, DRAW_SEARCH_ACTIVE_CHECK,
     DRAW_ROW, DRAW_SPAN, DRAW_ROW_END, DRAW_BROM_WAIT, SKIP_ROW, SKIP_ROW_BROM_WAIT,
@@ -155,6 +155,7 @@ reg spr_y_flip;
 reg [5:0] spr_width;
 reg [11:0] spr_scaled_width;
 reg [8:0] spr_height;
+reg [9:0] spr_scaled_height;   // registered in PRESCAN_LOAD2 (timing: 60 MHz)
 reg [4:0] spr_scale_x, spr_scale_y;
 wire spr_y_zoom = spr_scale_y[4];
 wire spr_x_zoom = spr_scale_x[4];
@@ -730,6 +731,11 @@ always_ff @(posedge clk) begin
             end
 
             PRESCAN_LOAD: begin
+                dma_state <= PRESCAN_LOAD2;
+            end
+
+            PRESCAN_LOAD2: begin
+                spr_scaled_height <= scaled_height(spr_scale_y, scale_pattern[spr_scale_y], spr_height);
                 dma_state <= PRESCAN_INITIAL_BROM;
             end
 
@@ -737,7 +743,7 @@ always_ff @(posedge clk) begin
                 spr.brom_offset <= 0;
                 tmp_x <= 0;
                 spr.source_line <= 0;
-                spr.screen_line <= global_flip_y ? (10'd224 - spr_y - scaled_height(spr_scale_y, scale_pattern[spr_scale_y], spr_height))
+                spr.screen_line <= global_flip_y ? (10'd224 - spr_y - spr_scaled_height)
                                                  : spr_y;
                 if (spr_force_global_y_flip) begin
                     flip_lookup_key <= { spr_brom_addr, spr_width, spr_height };

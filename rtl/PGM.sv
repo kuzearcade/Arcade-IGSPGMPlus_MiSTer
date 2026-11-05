@@ -146,7 +146,7 @@ wire paused;
 wire ce_20m, ce_dummy_10m;
 reg ce_cpu, ce_cpu_180;
 wire ce_8m, ce_16m, ce_33m;
-wire ce_50m = 1;
+wire ce_50m;     // 50 MHz enable from the 60 MHz system clock (5 of every 6 clocks)
 wire igs027a_share_ready;   // 0 = 68k shared-RAM access stalled (defer 68k ce)
 wire xram_e_ready;          // 0 = 68k access to the DDR-backed 0xe00000 RAM stalled (espgalarr core)
 /////////////////////////////
@@ -460,10 +460,30 @@ wire clocks_enabled = ss_cpu_execute | ~paused;
 //////////////////////////////////
 //// CLOCK ENABLES
 
+// The system clock is 60 MHz (it was 50 MHz) so the 68k can run at 30 MHz: fx68k takes one
+// phase per clock.  Every other timing is derived from ce_50m, a 50 MHz enable, so video,
+// sound and the 20 MHz 68k of the other games keep their exact rates.
+wire ce_dummy_25m;
+jtframe_frac_cen #(2) cen_50m
+(
+    .clk(clk),
+    .cen_in(1'b1),
+    .n(10'd5),
+    .m(10'd6),
+    .cen({ce_dummy_25m, ce_50m}),
+    .cenb()
+);
+
+// Espgaluda Arrange conversion: the 68k runs unthrottled, as fast as fx68k can take phases
+// (30 MHz less the SDRAM/DDR stalls) rather than at the board's 20 MHz.  The game paces
+// itself on vblank, so this only removes the frames its logic overran (MAME: 23-38% of the
+// frames in stages 2-6 at 20 MHz).
+wire cpu_unthrottled = game == GAME_ESPGALARR;
+
 jtframe_frac_cen #(2) cen_steady
 (
     .clk(clk),
-    .cen_in(clocks_enabled),
+    .cen_in(clocks_enabled & ce_50m),
     .n(10'd2),
     .m(10'd5),
     .cen({ce_dummy_10m, ce_20m}),
@@ -483,7 +503,7 @@ always_ff @(posedge clk) begin
     // Defer the 68k while a shared-RAM access is stalled on a DDR cache miss
     // (igs027a_share_ready=0), the same way the ROM path stalls via sdr_cpu sync.
     if (sdr_cpu_req == sdr_cpu_ack && clocks_enabled && igs027a_share_ready && xram_e_ready) begin
-        if (ce_cpu_count[10:1] != ce_steady_count) begin
+        if (cpu_unthrottled || ce_cpu_count[10:1] != ce_steady_count) begin
             ce_cpu <= ~ce_cpu_count[0];
             ce_cpu_180 <= ce_cpu_count[0];
             ce_cpu_count <= ce_cpu_count + 11'd1;
@@ -491,10 +511,41 @@ always_ff @(posedge clk) begin
     end
 end
 
+`ifdef VERILATOR
+// Simulation only: 68k throughput per frame (cpu_perf.txt): clocks, phases issued, clocks the
+// CPU was frozen on an SDRAM or 0xe00000 miss, bus cycles and the CPU clocks spent with AS low
+// (ROM / RAM split), from which the wait states follow.
+integer perf_fd;
+initial perf_fd = $fopen("cpu_perf.txt", "w");
+reg [31:0] perf_clks, perf_phases, perf_frz_sdr, perf_frz_x, perf_bus_rom, perf_bus_other, perf_as_rom, perf_as_other;
+reg perf_vb_d, perf_as_d;
+always_ff @(posedge clk) begin
+    perf_vb_d <= vblank;
+    perf_as_d <= cpu_as_n;
+    perf_clks <= perf_clks + 1;
+    if (ce_cpu | ce_cpu_180) perf_phases <= perf_phases + 1;
+    if (sdr_cpu_req != sdr_cpu_ack) perf_frz_sdr <= perf_frz_sdr + 1;
+    if (~xram_e_ready) perf_frz_x <= perf_frz_x + 1;
+    if (perf_as_d & ~cpu_as_n) begin
+        if (~ROMn) perf_bus_rom <= perf_bus_rom + 1; else perf_bus_other <= perf_bus_other + 1;
+    end
+    if (ce_cpu & ~cpu_as_n) begin
+        if (~ROMn) perf_as_rom <= perf_as_rom + 1; else perf_as_other <= perf_as_other + 1;
+    end
+    if (vblank & ~perf_vb_d) begin
+        $fwrite(perf_fd, "clks %0d phases %0d frz_sdr %0d frz_x %0d bus_rom %0d as_rom %0d bus_other %0d as_other %0d\n",
+                perf_clks, perf_phases, perf_frz_sdr, perf_frz_x, perf_bus_rom, perf_as_rom, perf_bus_other, perf_as_other);
+        $fflush(perf_fd);
+        perf_clks <= 0; perf_phases <= 0; perf_frz_sdr <= 0; perf_frz_x <= 0;
+        perf_bus_rom <= 0; perf_as_rom <= 0; perf_bus_other <= 0; perf_as_other <= 0;
+    end
+end
+`endif
+
 jtframe_frac_cen #(3) audio_cen
 (
     .clk(clk),
-    .cen_in(1),
+    .cen_in(ce_50m),
     .n(10'd615),
     .m(10'd908),
     .cen({ce_8m, ce_16m, ce_33m}),
@@ -1157,7 +1208,7 @@ ss_empty_slot #(.SS_IDX(SSIDX_IGS022_RAM_HI)) ss_igs022_hi(.clk, .ssbus(ssb[SSID
 // IGS027A ARM7 protection (pgm_arm type1/2/3).  TYPE1 (kovsh/photoy2k).
 //
 // The protection MCU runs from a device-specific XTAL, so its clock enable is
-// configurable per game (master clk is 50MHz, cen = clk * n/m):
+// configurable per game (cen = 50MHz (ce_50m) * n/m):
 //   20 MHz (2/5)  : type1 (kovsh/photoy2k), type2/3 base parts (55857E/F/G)
 //   22 MHz (11/25): martmast/dw2001/dwpc (type2), dmnfrnt/theglad (type3)
 //   24 MHz (12/25): dmnfrntpcb/happy6 (type3)
@@ -1185,7 +1236,7 @@ end
 wire ce_arm, ce_arm_ph2;
 jtframe_frac_cen #(2) arm_cen (
     .clk(clk),
-    .cen_in(clocks_enabled),
+    .cen_in(clocks_enabled & ce_50m),
     .n(arm_cen_n),
     .m(arm_cen_m),
     .cen({ce_arm_ph2, ce_arm}),
