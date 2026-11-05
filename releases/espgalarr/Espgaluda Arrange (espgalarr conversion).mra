@@ -1,0 +1,57 @@
+<misterromdescription>
+	<name>Espgaluda Arrange (espgalarr conversion)</name>
+	<setname>espgalarr</setname>
+	<rbf>IGSPGMPlus</rbf>
+	<rotation>vertical</rotation>
+	<mameversion>288</mameversion>
+	<buttons default="B,A,X,Y,Start,Select,L,R" names="A,B,C,D,-,-,Start,Coin,Pause,SS"/>
+	<switches default="ffff">
+		<dip name="Service Mode" bits="0" ids="On,Off"/>
+		<dip name="Music" bits="1" ids="Off,On"/>
+		<dip name="Voice" bits="2" ids="Off,On"/>
+		<dip name="Free Play" bits="3" ids="On,Off"/>
+		<dip name="Stop" bits="4" ids="On,Off"/>
+		<dip name="Unused 1" bits="5" ids="On,Off"/>
+		<dip name="Unused 2" bits="6" ids="On,Off"/>
+		<dip name="Debug" bits="7" ids="On,Off"/>
+	</switches>
+	<rom index="0" address="0x30000000" zip="espgalarr.zip">
+		<!-- SYSTEM INFO (game = GAME_ESPGALARR = 30): plain prog, RAM at 0xd00000 / 0xe00000,
+		     extended sprite list at 0xd0c840 -->
+		<part>1e 00</part>
+
+		<!-- BIOS PROG -->
+		<part>00 00020000 00000000</part>
+		<part name="pgm_p02s.u20"/>
+
+		<!-- BIOS TILE -->
+		<part>01 00200000 00000000</part>
+		<part name="pgm_t01s.rom"/>
+
+		<!-- BIOS MUSIC -->
+		<part>02 00200000 00000000</part>
+		<part name="pgm_m01s.rom"/>
+
+		<!-- CART PROG (4 MB, plain) -->
+		<part>03 00400000 00000000</part>
+		<part name="espgaluda_u8.bin"/>
+
+		<!-- CART TILE -->
+		<part>04 00800000 00180000</part>
+		<part name="cave_t04801w064.u19"/>
+
+		<!-- CART MUSIC (12 MB, ICS @0x400000: original SFX + the Arrange soundtrack) -->
+		<part>05 00c00000 00400000</part>
+		<part name="cave_w04801b032.u17"/>
+
+		<!-- A ROM (sprite colour) -->
+		<part>06 01000000 00000000</part>
+		<part name="cave_a04801w064.u7"/>
+		<part name="cave_a04802w064.u8"/>
+
+		<!-- B ROM (sprite mask) -->
+		<part>07 00800000 00000000</part>
+		<part name="cave_b04801w064.u1"/>
+	</rom>
+	<nvram index="8" size="131072"/>
+</misterromdescription>

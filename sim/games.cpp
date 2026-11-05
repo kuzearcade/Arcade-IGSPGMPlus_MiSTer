@@ -743,6 +743,7 @@ static const char *gGameNames[N_GAMES] = {
     "dwex",
     "puzzli2",
     "pstar",
+    "espgalarr",
 };
 
 static std::string gLoadedGameShortName = "unknown";
@@ -842,6 +843,30 @@ static void LoadEspgalbl()
 
     gLoadedGameShortName = "espgalbl";
     gSimCore.SetGame(GAME_PGM);
+}
+
+// Espgaluda Arrange conversion (espgalarr): espgalbl's layout with a 12 MB music ROM, plain
+// program, RAM at 0xd00000 / 0xe00000 and the extended sprite list (GAME_ESPGALARR)
+static void LoadEspgalarr()
+{
+    LoadPgm();
+
+    AddRomZip("espgalarr");
+
+    gSimCore.mSDRAM->LoadData("espgaluda_u8.bin", CART_PROG_ROM_SDR_BASE, 1);
+    gSimCore.mSDRAM->LoadData("cave_t04801w064.u19", CART_TILE_ROM_SDR_BASE, 1);
+    gSimCore.mSDRAM->LoadData("cave_b04801w064.u1", CART_B_ROM_SDR_BASE, 1);
+    gSimCore.mSDRAM->LoadData("cave_w04801b032.u17", CART_MUSIC_ROM_SDR_BASE, 1);
+    gSimCore.mSDRAM->LoadData("cave_a04801w064.u7", CART_A_ROM_SDR_BASE, 1);
+    gSimCore.mSDRAM->LoadData("cave_a04802w064.u8", CART_A_ROM_SDR_BASE + 0x0800000, 1);
+
+    gSimCore.mTop->rootp->sim_top__DOT__cart_present = 1;
+    gSimCore.mTop->rootp->sim_top__DOT__cart_prog_base = 0;
+    gSimCore.mTop->rootp->sim_top__DOT__cart_tile_base = 0x180000;
+    gSimCore.mTop->rootp->sim_top__DOT__cart_music_base = 0x400000;
+
+    gLoadedGameShortName = "espgalarr";
+    gSimCore.SetGame(GAME_ESPGALARR);
 }
 
 static void LoadOrlegend()
@@ -1888,6 +1913,9 @@ bool GameInit(Game game)
         break;
     case GAME_PSTAR:
         LoadPstar();
+        break;
+    case GAME_ESPGALARR:
+        LoadEspgalarr();
         break;
     default:
         return false;

@@ -24,6 +24,8 @@ rtl/igs023.sv
 rtl/igs023_fg.sv
 rtl/igs023_bg.sv
 rtl/igs023_sprite.sv
+rtl/igs023_brom_cache.sv
+rtl/espgalarr_xram.sv
 rtl/igs023_buffer.sv
 
 // protection devices

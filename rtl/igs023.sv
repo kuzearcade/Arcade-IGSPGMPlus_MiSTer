@@ -42,6 +42,11 @@ module IGS023 #(parameter SS_IDX=-1) (
     output reg [15:0] dma_addr,
     input [15:0] dma_din,
 
+    // espgalarr extended sprite list: continues the 256-entry list from a second RAM
+    input         ext_sprites,
+    output [14:0] ext_addr,
+    input  [15:0] ext_din,
+
     // VRAM interface
     output logic [14:0] vram_addr,
     input         [7:0] vram_din,
@@ -61,9 +66,9 @@ module IGS023 #(parameter SS_IDX=-1) (
     output reg        tile_rom_req,
     input             tile_rom_ack,
 
-    output reg [23:0] sprite_brom_address,
+    output     [23:0] sprite_brom_address,
     input      [63:0] sprite_brom_data,
-    output reg        sprite_brom_req,
+    output            sprite_brom_req,
     input             sprite_brom_ack,
 
     // Sprite A-ROM (colour) over SDRAM, toggle handshake (relative byte address).
@@ -307,6 +312,23 @@ IGS023_BG bg(
 reg sprite_frame_reset;
 reg sprite_next_line;
 
+wire [23:0] spr_brom_address;
+wire [63:0] spr_brom_data;
+wire        spr_brom_req, spr_brom_ack;
+
+IGS023_BROM_Cache brom_cache(
+    .clk(clk),
+    .reset(reset),
+    .req_address(spr_brom_address),
+    .req(spr_brom_req),
+    .ack(spr_brom_ack),
+    .data(spr_brom_data),
+    .sdr_address(sprite_brom_address),
+    .sdr_req(sprite_brom_req),
+    .sdr_ack(sprite_brom_ack),
+    .sdr_data(sprite_brom_data)
+);
+
 IGS023_Sprite sprite(
     .clk(clk),
     .ce_pixel(ce_pixel),
@@ -326,10 +348,13 @@ IGS023_Sprite sprite(
     .cpu_dtack_n(cpu_dtack_in_n),
     .dma_addr(dma_addr),
     .dma_din(dma_din),
-    .brom_address(sprite_brom_address),
-    .brom_data(sprite_brom_data),
-    .brom_req(sprite_brom_req),
-    .brom_ack(sprite_brom_ack),
+    .ext_sprites(ext_sprites),
+    .ext_addr(ext_addr),
+    .ext_din(ext_din),
+    .brom_address(spr_brom_address),
+    .brom_data(spr_brom_data),
+    .brom_req(spr_brom_req),
+    .brom_ack(spr_brom_ack),
 
     .arom_address(sprite_arom_address),
     .arom_data(sprite_arom_data),

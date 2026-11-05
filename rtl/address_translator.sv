@@ -34,6 +34,8 @@ module address_translator(
     output logic ARM_SHAREn,
     output logic ARM_LATCHn,
     output logic ARM_NMIn,
+    output logic XRAM_Dn,       // espgalarr: 64KB RAM 0xd00000-0xd0ffff
+    output logic XRAM_En,       // espgalarr: 128KB RAM 0xe00000-0xe1ffff
     output logic SS_SAVEn,
     output logic SS_RESETn,
     output logic SS_VECn
@@ -59,6 +61,8 @@ always_comb begin
     ARM_SHAREn = 1;
     ARM_LATCHn = 1;
     ARM_NMIn = 1;
+    XRAM_Dn = 1;
+    XRAM_En = 1;
 
     SS_SAVEn = 1;
     SS_RESETn = 1;
@@ -143,6 +147,14 @@ always_comb begin
             ARM_LATCHn = ~(cpu_word_addr[23:1]  == 23'h2e0180);// 0x5c0300-0x5c0301
             ARM_NMIn   = ~(cpu_word_addr[23:1]  == 23'h2e0000);// 0x5c0000-0x5c0001
             ROMn = ROMn | ~ARM_SHAREn | ~ARM_LATCHn | ~ARM_NMIn;
+        end
+
+        // Espgaluda Arrange conversion (espgalarr, MAME pgm_arm_type2_state::espgalarr): the
+        // DDP2 cart's shared-RAM window 0xd00000-0xd0ffff as plain RAM (bullet pool, extended
+        // sprite list at 0xd0c840) and 128KB of extra work RAM at 0xe00000-0xe1ffff.
+        if (game == GAME_ESPGALARR) begin
+            XRAM_Dn = ~(cpu_word_addr[23:16] == 8'hd0);
+            XRAM_En = ~(cpu_word_addr[23:17] == 7'b1110000);
         end
     end
 end

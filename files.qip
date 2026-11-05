@@ -14,6 +14,8 @@ set_global_assignment -name SYSTEMVERILOG_FILE rtl/igs023.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/igs023_fg.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/igs023_bg.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/igs023_sprite.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/igs023_brom_cache.sv
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/espgalarr_xram.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/igs023_buffer.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/igs026_x.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/rom_decrypt.sv

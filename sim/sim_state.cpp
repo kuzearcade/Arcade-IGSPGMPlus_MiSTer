@@ -107,7 +107,7 @@ void PrintStateProgress(const char *op, const char *phase, PGM *top, uint64_t el
                  root->sim_top__DOT__pgm_inst__DOT__save_state_data__DOT____Vcellout__memory_stream__write_req,
                  root->sim_top__DOT__pgm_inst__DOT__save_state_data__DOT____Vcellout__memory_stream__query_req,
                  root->sim_top__DOT__pgm_inst__DOT__save_state_data__DOT__memory_stream__DOT__chunk_index,
-                 root->sim_top__DOT__pgm_inst__DOT__save_state_data__DOT__memory_stream__DOT__chunk_select,
+                 root->sim_top__DOT__pgm_inst__DOT__save_state_data__DOT____Vcellout__memory_stream__chunk_select,
                  root->sim_top__DOT__pgm_inst__DOT__save_state_data__DOT____Vcellout__memory_stream__chunk_address,
                  root->sim_top__DOT__pgm_inst__DOT__save_state_data__DOT__memory_stream__DOT__chunk_remaining,
                  root->sim_top__DOT__pgm_inst__DOT__save_state_data__DOT__memory_stream__DOT__chunk_width,

@@ -35,6 +35,9 @@ package system_consts;
     parameter int SSIDX_IGS027A_SHARE = 16;   // 68k/ARM shared RAM (64KB)
     parameter int SSIDX_IGS027A_XOR   = 17;   // exrom XOR table (1KB)
     parameter int SSIDX_VERSION       = 18;   // build-version stamp (informational)
+    parameter int SSIDX_XRAM_D        = 19;   // espgalarr: 64KB RAM at 0xd00000 (DDP2 shared-RAM window)
+    parameter int SSIDX_XRAM_E        = 20;   // espgalarr: 128KB RAM at 0xe00000
+    parameter int SSIDX_COUNT         = 21;
 
     parameter bit [31:0] SS_DDR_BASE         = 32'h3E00_0000;
     // Free DDR window (was the sprite A-ROM, now moved to SDRAM).
@@ -143,7 +146,9 @@ package system_consts;
         GAME_HAPPY6   = 8'd26,   // IGS027A type3 (55857G), 24 MHz, scrambled gfx/audio ROMs
         GAME_DWEX     = 8'd27,   // never sent to RTL: dwex loads with the GAME_DRGW3 board id
         GAME_PUZZLI2  = 8'd28,   // IGS027A type1, 20 MHz, recreated int ROM
-        GAME_PSTAR    = 8'd29    // IGS027A type1 (kov map); pgm_pstar_decrypt, 1 MiB prog
+        GAME_PSTAR    = 8'd29,   // IGS027A type1 (kov map); pgm_pstar_decrypt, 1 MiB prog
+        GAME_ESPGALARR = 8'd30   // Espgaluda Arrange conversion (espgalarr): plain prog, no ARM,
+                                 // RAM at 0xd00000 / 0xe00000, extended sprite list
     } game_t;
 
     typedef struct packed {

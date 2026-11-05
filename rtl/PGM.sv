@@ -148,6 +148,7 @@ reg ce_cpu, ce_cpu_180;
 wire ce_8m, ce_16m, ce_33m;
 wire ce_50m = 1;
 wire igs027a_share_ready;   // 0 = 68k shared-RAM access stalled (defer 68k ce)
+wire xram_e_ready;          // 0 = 68k access to the DDR-backed 0xe00000 RAM stalled (espgalarr core)
 /////////////////////////////
 
 
@@ -177,9 +178,9 @@ wire ss_busy;
 reg  [63:0] ss_restored_version /* verilator public_flat */ = 0;
 
 ssbus_if ssbus();
-ssbus_if ssb[20]();
+ssbus_if ssb[SSIDX_COUNT]();
 
-ssbus_mux #(.COUNT(20)) ssmux(
+ssbus_mux #(.COUNT(SSIDX_COUNT)) ssmux(
     .clk,
     .slave(ssbus),
     .masters(ssb)
@@ -428,6 +429,8 @@ logic IGS022_RAMn;
 logic ARM_SHAREn;
 logic ARM_LATCHn;
 logic ARM_NMIn;
+logic XRAM_Dn;
+logic XRAM_En;
 
 //wire sdr_dtack_n = sdr_cpu_req != sdr_cpu_ack;
 wire sdr_dtack_n;
@@ -479,7 +482,7 @@ always_ff @(posedge clk) begin
 
     // Defer the 68k while a shared-RAM access is stalled on a DDR cache miss
     // (igs027a_share_ready=0), the same way the ROM path stalls via sdr_cpu sync.
-    if (sdr_cpu_req == sdr_cpu_ack && clocks_enabled && igs027a_share_ready) begin
+    if (sdr_cpu_req == sdr_cpu_ack && clocks_enabled && igs027a_share_ready && xram_e_ready) begin
         if (ce_cpu_count[10:1] != ce_steady_count) begin
             ce_cpu <= ~ce_cpu_count[0];
             ce_cpu_180 <= ce_cpu_count[0];
@@ -572,6 +575,8 @@ address_translator address_translator(
     .ARM_SHAREn,
     .ARM_LATCHn,
     .ARM_NMIn,
+    .XRAM_Dn,
+    .XRAM_En,
 
     .SS_SAVEn,
     .SS_RESETn,
@@ -591,6 +596,8 @@ assign cpu_data_in = ~SS_SAVEn ? ss_irq_handler[cpu_addr[3:0]] :
                      ~IGS022_RAMn ? igs022_ram_q :
                      ~ARM_SHAREn ? igs027a_share_q :
                      ~ARM_LATCHn ? igs027a_latch_q :
+                     ~XRAM_Dn ? xram_d_q :
+                     ~XRAM_En ? xram_e_q :
                      16'd0;
 
 wire [15:0] workram_addr;
@@ -664,6 +671,97 @@ m68k_ram_ss_adaptor #(.WIDTHAD(15), .SS_IDX(SSIDX_Z80_RAM)) aram_ss(
     .ssbus(ssb[SSIDX_Z80_RAM])
 );
 
+
+// Espgaluda Arrange conversion (GAME_ESPGALARR) RAM, MAME pgm_arm_type2_state::espgalarr:
+// 64KB at 0xd00000 (the DDP2 cart's shared-RAM window, plain RAM here: bullet pool and the
+// extended sprite list at 0xd0c840, which the sprite DMA reads through port B) and 128KB of
+// extra work RAM at 0xe00000.  Zero-wait like the work RAM.
+wire [14:0] xram_d_addr;
+wire xram_d_lds_n, xram_d_uds_n;
+wire [15:0] xram_d_data, xram_d_q;
+wire [14:0] igs023_ext_addr;
+wire [15:0] igs023_ext_q;
+
+m68k_ram_dp #(.WIDTHAD(15)) xram_d(
+    .clock(clk),
+    .address_a(xram_d_addr),
+    .we_lds_n_a(xram_d_lds_n),
+    .we_uds_n_a(xram_d_uds_n),
+    .data_a(xram_d_data),
+    .q_a(xram_d_q),
+
+    .address_b(igs023_ext_addr),
+    .we_lds_n_b(1'b1),
+    .we_uds_n_b(1'b1),
+    .data_b(16'd0),
+    .q_b(igs023_ext_q)
+);
+
+m68k_ram_ss_adaptor #(.WIDTHAD(15), .SS_IDX(SSIDX_XRAM_D)) xram_d_ss(
+    .clk,
+    .addr_in(cpu_addr[14:0]),
+    .lds_n_in(XRAM_Dn | cpu_ds_n[0] | cpu_rw),
+    .uds_n_in(XRAM_Dn | cpu_ds_n[1] | cpu_rw),
+    .data_in(cpu_data_out),
+
+    .q(xram_d_q),
+
+    .addr_out(xram_d_addr),
+    .lds_n_out(xram_d_lds_n),
+    .uds_n_out(xram_d_uds_n),
+    .data_out(xram_d_data),
+
+    .ssbus(ssb[SSIDX_XRAM_D])
+);
+
+`ifdef ESPGALARR_CORE
+wire [15:0] xram_e_q;
+espgalarr_xram #(.SS_IDX(SSIDX_XRAM_E)) xram_e(
+    .clk, .reset,
+    .cs_n(XRAM_En),
+    .addr(cpu_word_addr[16:1]),
+    .din(cpu_data_out),
+    .we_u(~cpu_rw & ~cpu_ds_n[1]),
+    .we_l(~cpu_rw & ~cpu_ds_n[0]),
+    .q(xram_e_q),
+    .ready(xram_e_ready),
+    .ss_paused(ss_paused),
+    .ssbus(ssb[SSIDX_XRAM_E]),
+    .ddr0(ddr_share0),
+    .ddr1(ddr_share1)
+);
+`else
+wire [15:0] xram_e_addr;
+wire xram_e_lds_n, xram_e_uds_n;
+wire [15:0] xram_e_data, xram_e_q;
+
+m68k_ram #(.WIDTHAD(16)) xram_e(
+    .clock(clk),
+    .address(xram_e_addr),
+    .we_lds_n(xram_e_lds_n),
+    .we_uds_n(xram_e_uds_n),
+    .data(xram_e_data),
+    .q(xram_e_q)
+);
+
+m68k_ram_ss_adaptor #(.WIDTHAD(16), .SS_IDX(SSIDX_XRAM_E)) xram_e_ss(
+    .clk,
+    .addr_in(cpu_addr[15:0]),
+    .lds_n_in(XRAM_En | cpu_ds_n[0] | cpu_rw),
+    .uds_n_in(XRAM_En | cpu_ds_n[1] | cpu_rw),
+    .data_in(cpu_data_out),
+
+    .q(xram_e_q),
+
+    .addr_out(xram_e_addr),
+    .lds_n_out(xram_e_lds_n),
+    .uds_n_out(xram_e_uds_n),
+    .data_out(xram_e_data),
+
+    .ssbus(ssb[SSIDX_XRAM_E])
+);
+assign xram_e_ready = 1'b1;
+`endif
 
 wire [11:0] pal_addr;
 wire pal_lds_n, pal_uds_n;
@@ -776,6 +874,11 @@ IGS023 #(.SS_IDX(SSIDX_IGS023)) igs023(
 
     .dma_addr(igs023_dma_addr),
     .dma_din(workram_q),
+
+    // espgalarr extended sprite list (0xd0c840 in xram_d)
+    .ext_sprites(game == GAME_ESPGALARR),
+    .ext_addr(igs023_ext_addr),
+    .ext_din(igs023_ext_q),
 
     // VRAM interface
     .vram_addr(igs023_vram_addr),
@@ -971,6 +1074,7 @@ wire [3:0]  a27_cache_be;
 wire [31:0] prot_cache_rdata;
 wire        prot_cache_ready;
 
+`ifndef ESPGALARR_CORE
 prot_cache prot_cache(
     .clk, .reset,
     .req    (arm_game ? a27_cache_req   : (i22_game ? i22_cache_req : 1'b0)),
@@ -982,6 +1086,11 @@ prot_cache prot_cache(
     .ready  (prot_cache_ready),
     .ddr    (ddr_prot)
 );
+`else
+assign prot_cache_rdata = 32'd0;
+assign prot_cache_ready = 1'b1;
+ddr_idle ddr_prot_idle(.ddr(ddr_prot));
+`endif
 
 // IGS022 + IGS025 protection (The Killing Blade / Dragon World 3).
 wire [15:0] igs025_q, igs022_ram_q;
@@ -1005,6 +1114,7 @@ igs025 #(.SS_IDX(SSIDX_IGS025)) igs025(
     .ssbus(ssb[SSIDX_IGS025])
 );
 
+`ifndef ESPGALARR_CORE
 igs022 #(
     .SS_IDX(SSIDX_IGS022),
     .SS_IDX_RAM_LO(SSIDX_IGS022_RAM_LO),
@@ -1034,6 +1144,15 @@ igs022 #(
     .ss_ram_lo(ssb[SSIDX_IGS022_RAM_LO]),
     .ss_ram_hi(ssb[SSIDX_IGS022_RAM_HI])
 );
+`else
+assign igs022_ram_q = 16'd0;
+assign igs022_busy = 1'b0;
+assign i22_cache_req = 1'b0;
+assign i22_cache_addr = 32'd0;
+ss_empty_slot #(.SS_IDX(SSIDX_IGS022))        ss_igs022(.clk, .ssbus(ssb[SSIDX_IGS022]));
+ss_empty_slot #(.SS_IDX(SSIDX_IGS022_RAM_LO)) ss_igs022_lo(.clk, .ssbus(ssb[SSIDX_IGS022_RAM_LO]));
+ss_empty_slot #(.SS_IDX(SSIDX_IGS022_RAM_HI)) ss_igs022_hi(.clk, .ssbus(ssb[SSIDX_IGS022_RAM_HI]));
+`endif
 
 // IGS027A ARM7 protection (pgm_arm type1/2/3).  TYPE1 (kovsh/photoy2k).
 //
@@ -1092,6 +1211,7 @@ wire        arm_nmi_set  = arm_type3 & ~ARM_NMIn   & ~cpu_rw & ~(&cpu_ds_n);
 // does not, and must not route its 0x08xxxxxx stub probes into the DDR cache.
 wire        arm_has_exrom = arm_type2 | arm_type3;
 
+`ifndef ESPGALARR_CORE
 igs027a #(
     .TYPE(1),
     .SS_IDX(SSIDX_IGS027A),
@@ -1153,6 +1273,27 @@ igs027a #(
     .dbg_pc(arm_dbg_pc),
     .dbg_cpsr(arm_dbg_cpsr)
 );
+`else
+// espgalarr core: no ARM.  0xd10000 latch / ARM window unused; the 68k stalls only on the
+// DDR-backed 0xe00000 RAM (espgalarr_xram).
+assign igs027a_latch_q = 16'd0;
+assign igs027a_share_q = 16'd0;
+assign igs027a_ss_ready = 1'b1;
+assign igs027a_share_ready = 1'b1;
+assign a27_cache_req = 1'b0;
+assign a27_cache_write = 1'b0;
+assign a27_cache_addr = 32'd0;
+assign a27_cache_wdata = 32'd0;
+assign a27_cache_be = 4'd0;
+assign arm_dbg_pc = 32'd0;
+assign arm_dbg_cpsr = 32'd0;
+ddr_idle ddr_arm_idle(.ddr(ddr_arm));
+ddr_idle ddr_iram_idle(.ddr(ddr_iram));
+ss_empty_slot #(.SS_IDX(SSIDX_IGS027A))       ss_igs027a(.clk, .ssbus(ssb[SSIDX_IGS027A]));
+ss_empty_slot #(.SS_IDX(SSIDX_IGS027A_IRAM))  ss_igs027a_iram(.clk, .ssbus(ssb[SSIDX_IGS027A_IRAM]));
+ss_empty_slot #(.SS_IDX(SSIDX_IGS027A_SHARE)) ss_igs027a_share(.clk, .ssbus(ssb[SSIDX_IGS027A_SHARE]));
+ss_empty_slot #(.SS_IDX(SSIDX_IGS027A_XOR))   ss_igs027a_xor(.clk, .ssbus(ssb[SSIDX_IGS027A_XOR]));
+`endif
 
 V3021 v3021(
     .clk,
