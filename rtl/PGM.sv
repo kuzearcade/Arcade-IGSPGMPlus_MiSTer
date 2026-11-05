@@ -21,6 +21,7 @@ module PGM #(
     parameter [63:0] SS_VERSION = 64'd0
 )(
     input             clk_50m,
+    input             clk_cpu,      // CPU_ISLAND: 80 MHz 68k clock (same clock as clk_50m in the sim)
     input             reset,
 
     input  game_t     game,
@@ -155,7 +156,7 @@ wire xram_e_ready;          // 0 = 68k access to the DDR-backed 0xe00000 RAM sta
 /////////////////////////////
 //// CPU Signals
 wire        cpu_rw, cpu_as_n;
-wire [1:0]  cpu_ds_n;
+wire [1:0]  cpu_ds_n /* verilator public_flat */;
 wire [2:0]  cpu_fc;
 wire        cpu_bg_n;
 wire        cpu_br_n;
@@ -368,7 +369,7 @@ always_ff @(posedge clk) begin
         end
 
         SST_SAVE_WAIT_IRQ_EXIT: begin
-            if (cpu_ds_n == 2'b00 && cpu_rw && cpu_fc == 3'b110 && SS_SAVEn) begin
+            if ((cpu_ds_n == 2'b00 && cpu_rw && cpu_fc == 3'b110 && SS_SAVEn) || cpu_sv_fetch) begin
                 ss_state <= SST_IDLE;
             end
         end
@@ -405,7 +406,7 @@ always_ff @(posedge clk) begin
         end
 
         SST_RESTORE_WAIT_RESET: begin
-            if (cpu_ds_n == 2'b00 && cpu_rw && cpu_fc == 3'b110 && SS_SAVEn && SS_RESETn) begin
+            if ((cpu_ds_n == 2'b00 && cpu_rw && cpu_fc == 3'b110 && SS_SAVEn && SS_RESETn) || cpu_sv_fetch) begin
                 ss_state <= SST_IDLE;
             end
         end
@@ -444,10 +445,17 @@ wire igs023_dtack_n;
 wire igs022_busy;
 wire prot_dtack_n = ~IGS025n & igs022_busy;
 
+`ifdef CPU_ISLAND
+wire dtack_n = igs023_dtack_n
+             | prot_dtack_n;
+wire [15:0] rom_q = 16'd0;      // the ROM is read on the CPU side
+`else
+wire cpu_sv_fetch = 1'b0;
 wire dtack_n = sdr_dtack_n
              | pre_sdr_dtack_n
              | igs023_dtack_n
              | prot_dtack_n;
+`endif
 
 wire [2:0] IPLn;
 wire DTACKn = dtack_n;
@@ -512,6 +520,7 @@ always_ff @(posedge clk) begin
 end
 
 `ifdef VERILATOR
+`ifndef CPU_ISLAND
 // Simulation only: 68k throughput per frame (cpu_perf.txt): clocks, phases issued, clocks the
 // CPU was frozen on an SDRAM or 0xe00000 miss, bus cycles and the CPU clocks spent with AS low
 // (ROM / RAM split), from which the wait states follow.
@@ -541,6 +550,7 @@ always_ff @(posedge clk) begin
     end
 end
 `endif
+`endif
 
 jtframe_frac_cen #(3) audio_cen
 (
@@ -566,6 +576,127 @@ jtframe_frac_cen #(2) rtc_cen
 //////////////////////////////////
 //// CPU
 
+`ifdef CPU_ISLAND
+// The 68k runs in its own 80 MHz domain (rtl/cpu_island.sv) with the program ROM cache, the
+// work RAM and the 0xd00000 RAM.  Its other bus cycles arrive here as requests and are replayed
+// as 68k bus cycles (the cpu_* signals below), so the device logic is unchanged.
+reg  [22:0] sh_addr;
+reg   [1:0] sh_ds_n = 2'b11;
+reg         sh_as_n = 1, sh_rw = 1;
+reg   [2:0] sh_fc;
+reg  [15:0] sh_dout;
+assign cpu_addr = sh_addr;
+assign cpu_ds_n = sh_ds_n;
+assign cpu_as_n = sh_as_n;
+assign cpu_rw = sh_rw;
+assign cpu_fc = sh_fc;
+assign cpu_data_out = sh_dout;
+
+wire        isl_req, isl_rw, isl_bg_n, isl_sv_fetch;
+wire [22:0] isl_addr;
+wire  [1:0] isl_ds_n;
+wire  [2:0] isl_fc;
+wire [15:0] isl_dout;
+reg         isl_ack = 0;
+reg  [15:0] isl_din;
+reg   [1:0] isl_req_s, isl_bg_s, isl_sv_s;
+reg         isl_seen = 0, isl_busy = 0;
+reg   [2:0] isl_cnt;
+reg         isl_sv_d;
+wire        cpu_sv_fetch = isl_sv_s[1] ^ isl_sv_d;     // a supervisor program read on the CPU side
+assign cpu_bg_n = isl_bg_s[1];
+
+always_ff @(posedge clk) begin
+    isl_req_s <= { isl_req_s[0], isl_req };
+    isl_bg_s  <= { isl_bg_s[0], isl_bg_n };
+    isl_sv_s  <= { isl_sv_s[0], isl_sv_fetch };
+    isl_sv_d  <= isl_sv_s[1];
+
+    if (~isl_busy) begin
+        if (isl_req_s[1] != isl_seen) begin
+            isl_seen <= isl_req_s[1];
+            sh_addr  <= isl_addr;
+            sh_ds_n  <= isl_ds_n;
+            sh_rw    <= isl_rw;
+            sh_fc    <= isl_fc;
+            sh_dout  <= isl_dout;
+            sh_as_n  <= 0;
+            isl_cnt  <= 0;
+            isl_busy <= 1;
+        end
+    end else begin
+        if (isl_cnt != 3'd7) isl_cnt <= isl_cnt + 3'd1;
+        // at least three clocks for the block-RAM-backed devices, then their DTACK/ready
+        if (isl_cnt >= 3'd2 && ~dtack_n && igs027a_share_ready && xram_e_ready) begin
+            isl_din  <= cpu_data_in;
+            sh_as_n  <= 1;
+            sh_ds_n  <= 2'b11;
+            sh_rw    <= 1;
+            isl_ack  <= isl_seen;
+            isl_busy <= 0;
+        end
+    end
+end
+
+wire [15:0] isl_wram_addr, isl_wram_d, isl_wram_q;
+wire        isl_wram_we_u_n, isl_wram_we_l_n;
+wire [14:0] isl_xd_addr;
+wire [15:0] isl_xd_d, isl_xd_q;
+wire        isl_xd_we_u_n, isl_xd_we_l_n;
+wire [15:0] isl_nvram_q_word;
+
+// NVRAM writes cross as a toggle with the address and byte held
+reg         nv_wr_t = 0;
+reg  [16:0] nv_waddr;
+reg   [7:0] nv_wdata;
+always_ff @(posedge clk) begin
+    if (nvram_wr) begin
+        nv_waddr <= nvram_addr;
+        nv_wdata <= nvram_data;
+        nv_wr_t  <= ~nv_wr_t;
+    end
+end
+
+// the island's control inputs cross from registers (its synchronisers have a quarter of a 60 MHz
+// period at worst between the two clocks' edges)
+reg       isl_reset_r, isl_run_r, isl_ovr_r;
+reg [2:0] isl_ipl_r;
+always_ff @(posedge clk) begin
+    isl_reset_r <= reset | ss_reset;
+    isl_run_r   <= clocks_enabled;
+    isl_ovr_r   <= ss_override;
+    isl_ipl_r   <= IPLn;
+end
+
+cpu_island cpu_island(
+    .clk_cpu,
+    .reset_sys(isl_reset_r),
+    .run_sys(isl_run_r),
+    .unthrottled(cpu_unthrottled),
+    .ss_override_sys(isl_ovr_r),
+    .ipl_n_sys(isl_ipl_r),
+    .br_n_sys(cpu_br_n),
+    .bgack_n_sys(cpu_bgack_n),
+    .game,
+    .cart_present,
+    .cart_base_addr(cart_prog_base[23:1]),
+    .bg_n(isl_bg_n),
+
+    .bridge_req(isl_req), .bridge_addr(isl_addr), .bridge_ds_n(isl_ds_n), .bridge_rw(isl_rw),
+    .bridge_fc(isl_fc), .bridge_dout(isl_dout), .bridge_ack_sys(isl_ack), .bridge_din(isl_din),
+    .sv_fetch(isl_sv_fetch),
+
+    .sdr_addr(sdr_cpu_addr), .sdr_req(sdr_cpu_req), .sdr_ack(sdr_cpu_ack), .sdr_data(sdr_cpu_q),
+
+    .wram_addr(isl_wram_addr), .wram_we_u_n(isl_wram_we_u_n), .wram_we_l_n(isl_wram_we_l_n),
+    .wram_d(isl_wram_d), .wram_q(isl_wram_q),
+    .xd_addr(isl_xd_addr), .xd_we_u_n(isl_xd_we_u_n), .xd_we_l_n(isl_xd_we_l_n),
+    .xd_d(isl_xd_d), .xd_q(isl_xd_q),
+
+    .nvram_wr_t_sys(nv_wr_t), .nvram_waddr(nv_waddr), .nvram_wdata(nv_wdata),
+    .nvram_raddr(nvram_addr), .nvram_q_word(isl_nvram_q_word)
+);
+`else
 fx68k m68000(
     .clk(clk),
     .HALTn(1),
@@ -587,6 +718,7 @@ fx68k m68000(
     .iEdb(cpu_data_in), .oEdb(cpu_data_out),
     .eab(cpu_addr)
 );
+`endif
 
 wire [15:0] IN0 = { 
     joystick_p2[6:4], joystick_p2[0], joystick_p2[1], joystick_p2[2], joystick_p2[3], start[1],
@@ -657,6 +789,44 @@ wire [15:0] workram_data, workram_q;
 
 wire workram_dma = ~cpu_bgack_n;
 
+`ifdef CPU_ISLAND
+// port A: the CPU (80 MHz, in cpu_island, which also serves the NVRAM); port B: the sprite DMA
+// and savestates
+assign nvram_q = ~nvram_addr[0] ? isl_nvram_q_word[7:0] : isl_nvram_q_word[15:8];
+
+m68k_ram_dp2 #(.WIDTHAD(16)) work_ram(
+    .clock_a(clk_cpu),
+    .address_a(isl_wram_addr),
+    .we_lds_n_a(isl_wram_we_l_n),
+    .we_uds_n_a(isl_wram_we_u_n),
+    .data_a(isl_wram_d),
+    .q_a(isl_wram_q),
+
+    .clock_b(clk),
+    .address_b(workram_addr),
+    .we_lds_n_b(workram_lds_n),
+    .we_uds_n_b(workram_uds_n),
+    .data_b(workram_data),
+    .q_b(workram_q)
+);
+
+m68k_ram_ss_adaptor #(.WIDTHAD(16), .SS_IDX(SSIDX_WORK_RAM)) workram_ss(
+    .clk,
+    .addr_in(igs023_dma_addr),
+    .lds_n_in(1'b1),
+    .uds_n_in(1'b1),
+    .data_in(16'd0),
+
+    .q(workram_q),
+
+    .addr_out(workram_addr),
+    .lds_n_out(workram_lds_n),
+    .uds_n_out(workram_uds_n),
+    .data_out(workram_data),
+
+    .ssbus(ssb[SSIDX_WORK_RAM])
+);
+`else
 wire [15:0] nvram_q_word;
 assign nvram_q = ~nvram_addr[0] ? nvram_q_word[7:0] : nvram_q_word[15:8];
 
@@ -691,6 +861,8 @@ m68k_ram_ss_adaptor #(.WIDTHAD(16), .SS_IDX(SSIDX_WORK_RAM)) workram_ss(
 
     .ssbus(ssb[SSIDX_WORK_RAM])
 );
+
+`endif
 
 wire [14:0] aram_addr;
 wire aram_lds_n, aram_uds_n;
@@ -733,6 +905,43 @@ wire [15:0] xram_d_data, xram_d_q;
 wire [14:0] igs023_ext_addr;
 wire [15:0] igs023_ext_q;
 
+`ifdef CPU_ISLAND
+// port A: the CPU (80 MHz); port B: the sprite DMA's extended list and savestates
+assign xram_d_q = 16'd0;    // read on the CPU side
+
+m68k_ram_dp2 #(.WIDTHAD(15)) xram_d(
+    .clock_a(clk_cpu),
+    .address_a(isl_xd_addr),
+    .we_lds_n_a(isl_xd_we_l_n),
+    .we_uds_n_a(isl_xd_we_u_n),
+    .data_a(isl_xd_d),
+    .q_a(isl_xd_q),
+
+    .clock_b(clk),
+    .address_b(xram_d_addr),
+    .we_lds_n_b(xram_d_lds_n),
+    .we_uds_n_b(xram_d_uds_n),
+    .data_b(xram_d_data),
+    .q_b(igs023_ext_q)
+);
+
+m68k_ram_ss_adaptor #(.WIDTHAD(15), .SS_IDX(SSIDX_XRAM_D)) xram_d_ss(
+    .clk,
+    .addr_in(igs023_ext_addr),
+    .lds_n_in(1'b1),
+    .uds_n_in(1'b1),
+    .data_in(16'd0),
+
+    .q(igs023_ext_q),
+
+    .addr_out(xram_d_addr),
+    .lds_n_out(xram_d_lds_n),
+    .uds_n_out(xram_d_uds_n),
+    .data_out(xram_d_data),
+
+    .ssbus(ssb[SSIDX_XRAM_D])
+);
+`else
 m68k_ram_dp #(.WIDTHAD(15)) xram_d(
     .clock(clk),
     .address_a(xram_d_addr),
@@ -764,6 +973,8 @@ m68k_ram_ss_adaptor #(.WIDTHAD(15), .SS_IDX(SSIDX_XRAM_D)) xram_d_ss(
 
     .ssbus(ssb[SSIDX_XRAM_D])
 );
+
+`endif
 
 `ifdef ESPGALARR_CORE
 wire [15:0] xram_e_q;
@@ -1411,6 +1622,7 @@ always_comb begin
     end
 end
 
+`ifndef CPU_ISLAND
 reg prev_ds_n;
 
 wire pre_sdr_dtack_n = ~ROMn & prev_ds_n;
@@ -1436,6 +1648,7 @@ rom_cache rom_cache(
 always_ff @(posedge clk) begin
     prev_ds_n <= cpu_as_n;
 end
+`endif
 
 `ifdef USE_AUTO_SS
 wire [31:0] z80_ss_in, z80_ss_out;

@@ -441,14 +441,15 @@ joy_db15 #(.DIV_BITS(10)) joy_db15
 
 ///////////////////////   CLOCKS   ///////////////////////////////
 
-wire clk_sys, clk_sdr, pll_locked;
+wire clk_sys, clk_sdr, clk_cpu, pll_locked;
 pll pll
 (
     .refclk(CLK_50M),
     .rst(0),
     .locked(pll_locked),
     .outclk_0(clk_sdr),
-    .outclk_1(clk_sys)
+    .outclk_1(clk_sys),
+    .outclk_2(clk_cpu)      // 80 MHz: the 68k (CPU_ISLAND)
 );
 
 wire reset = RESET | status[0] | buttons[1] | rom_load_busy | nvram_dl;
@@ -725,6 +726,7 @@ wire sync_fix = ~status[19];
 
 PGM #(.SS_VERSION(SS_VERSION)) pgm_inst(
     .clk_50m(clk_sys),
+    .clk_cpu(clk_cpu),
     .reset(reset),
 
     .pause(system_pause),
