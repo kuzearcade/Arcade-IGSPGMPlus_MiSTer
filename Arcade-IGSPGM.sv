@@ -473,14 +473,30 @@ wire [1:0] sdr_cpu_be, sdr_rom_be;
 wire sdr_cpu_req, sdr_rom_req;
 wire sdr_cpu_rw, sdr_rom_rw;
 
-wire [26:0] sdr_ch3_addr = rom_load_busy ? sdr_rom_addr : sdr_cpu_addr;
-wire [15:0] sdr_ch3_din = sdr_rom_din;
+// The ROM loader's side of SDRAM channel 3 is registered: its address/request logic is too
+// slow for the clk_sys -> clk_sdr crossing at 60/120 MHz.  Loading is not latency-bound, and
+// the loader waits for ack == req, which a one-cycle-late request still satisfies.
+reg  [26:0] sdr_rom_addr_r;
+reg  [15:0] sdr_rom_din_r;
+reg   [1:0] sdr_rom_be_r;
+reg         sdr_rom_req_r, sdr_rom_rw_r, rom_load_busy_r;
+always @(posedge clk_sys) begin
+    sdr_rom_addr_r  <= sdr_rom_addr;
+    sdr_rom_din_r   <= sdr_rom_din;
+    sdr_rom_be_r    <= sdr_rom_be;
+    sdr_rom_req_r   <= sdr_rom_req;
+    sdr_rom_rw_r    <= sdr_rom_rw;
+    rom_load_busy_r <= rom_load_busy;
+end
+
+wire [26:0] sdr_ch3_addr = rom_load_busy_r ? sdr_rom_addr_r : sdr_cpu_addr;
+wire [15:0] sdr_ch3_din = sdr_rom_din_r;
 wire [63:0] sdr_cpu_dout = sdr_ch3_dout;
-wire [1:0] sdr_ch3_be = rom_load_busy ? sdr_rom_be : 2'b00;
-wire sdr_ch3_req = rom_load_busy ? sdr_rom_req : sdr_cpu_req;
-wire sdr_cpu_ack = rom_load_busy ? sdr_cpu_req : sdr_ch3_ack; // FIXME, wtf to do with this in unknown state?
-wire sdr_rom_ack = rom_load_busy ? sdr_ch3_ack : sdr_rom_req;
-wire sdr_ch3_rnw = rom_load_busy ? sdr_rom_rw  : 1;
+wire [1:0] sdr_ch3_be = rom_load_busy_r ? sdr_rom_be_r : 2'b00;
+wire sdr_ch3_req = rom_load_busy_r ? sdr_rom_req_r : sdr_cpu_req;
+wire sdr_cpu_ack = rom_load_busy_r ? sdr_cpu_req : sdr_ch3_ack; // FIXME, wtf to do with this in unknown state?
+wire sdr_rom_ack = rom_load_busy_r ? sdr_ch3_ack : sdr_rom_req_r;
+wire sdr_ch3_rnw = rom_load_busy_r ? sdr_rom_rw_r  : 1;
 
 sdram sdram
 (

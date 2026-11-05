@@ -21,7 +21,7 @@
 module sdram
 (
     input             init,        // reset to initialize RAM
-    input             clk,         // clock 64MHz
+    input             clk,         // clock 120MHz
 
     input             doRefresh,
 
@@ -83,7 +83,7 @@ localparam OP_MODE             = 2'b00;    // only 00 (standard operation) allow
 localparam NO_WRITE_BURST      = 1'b1;     // 0= write burst enabled, 1=only single access write
 localparam MODE                = {3'b000, NO_WRITE_BURST, OP_MODE, CAS_LATENCY, ACCESS_TYPE, BURST_CODE};
 
-localparam sdram_startup_cycles= 14'd12100;// 100us, plus a little more, @ 100MHz
+localparam sdram_startup_cycles= 14'd12100;// 100us at 120MHz (121us at 100MHz)
 localparam cycles_per_refresh  = 14'd500;  // (64000*64)/8192-1 Calc'd as (64ms @ 64MHz)/8192 rose
 localparam startup_refresh_max = 14'b11111111111111;
 
@@ -103,6 +103,7 @@ reg        chip;
 localparam STATE_STARTUP = 0;
 localparam STATE_WAIT    = 1;
 localparam STATE_RW1     = 2;
+localparam STATE_WAIT2   = 3;
 localparam STATE_IDLE    = 4;
 localparam STATE_IDLE_1  = 5;
 localparam STATE_IDLE_2  = 6;
@@ -110,6 +111,9 @@ localparam STATE_IDLE_3  = 7;
 localparam STATE_IDLE_4  = 8;
 localparam STATE_IDLE_5  = 9;
 localparam STATE_RFSH    = 10;
+localparam STATE_IDLE_6  = 11;
+localparam STATE_IDLE_7  = 12;
+localparam STATE_IDLE_8  = 13;
 
 
 always @(posedge clk) begin
@@ -232,6 +236,12 @@ always @(posedge clk) begin
             end
         end
 
+        // Command spacing at 120MHz (8.33ns): a read's auto-precharge needs tRP (18-21ns) after
+        // the burst, so the next ACTIVE comes 7 clocks after READ; write: tWR + tRP, 6 clocks;
+        // refresh: tRFC (63-66ns), 9 clocks.
+        STATE_IDLE_8: state <= STATE_IDLE_7;
+        STATE_IDLE_7: state <= STATE_IDLE_6;
+        STATE_IDLE_6: state <= STATE_IDLE_5;
         STATE_IDLE_5: state <= STATE_IDLE_4;
         STATE_IDLE_4: state <= STATE_IDLE_3;
         STATE_IDLE_3: state <= STATE_IDLE_2;
@@ -239,7 +249,7 @@ always @(posedge clk) begin
         STATE_IDLE_1: state <= STATE_IDLE;
 
         STATE_RFSH: begin
-            state    <= STATE_IDLE_5;
+            state    <= STATE_IDLE_8;
             command  <= CMD_AUTO_REFRESH;
             chip     <= 1;
         end
@@ -310,7 +320,9 @@ always @(posedge clk) begin
             end
         end
 
-        STATE_WAIT: state <= STATE_RW1;
+        // two cycles from ACTIVE to READ/WRITE: tRCD (18-21ns) at 120MHz needs three clocks
+        STATE_WAIT: state <= STATE_WAIT2;
+        STATE_WAIT2: state <= STATE_RW1;
         STATE_RW1: begin
             SDRAM_A <= cas_addr;
             if(saved_wr) begin
@@ -321,11 +333,11 @@ always @(posedge clk) begin
                 if(ch == 2) ch3_ack  <= ch3_req;
                 if(ch == 3) ch4_ack  <= ch4_req;
                 if(ch == 4) ch5_ack  <= ch5_req;
-                state <= STATE_IDLE_2;
+                state <= STATE_IDLE_5;
             end
             else begin
                 command <= CMD_READ;
-                state   <= STATE_IDLE_5;
+                state   <= STATE_IDLE_6;
                      if(ch == 0) data_ready_delay1[CAS_LATENCY+BURST_LENGTH+1] <= 1;
                 else if(ch == 1) data_ready_delay2[CAS_LATENCY+BURST_LENGTH+1] <= 1;
                 else if(ch == 2) data_ready_delay3[CAS_LATENCY+BURST_LENGTH+1] <= 1;
