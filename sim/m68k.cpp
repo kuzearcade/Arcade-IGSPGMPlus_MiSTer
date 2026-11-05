@@ -12,10 +12,17 @@ void M68K::MapMemory(uint32_t address, uint32_t mask, const MemoryInterface& mem
     mMemory.push_back({address, mask, memory});
 }
 
+// the fx68k instance: in cpu_island when the 68k has its own clock domain
+#ifdef CPU_ISLAND
+#define M68K_SIGNAL(...) G_PGM_SIGNAL(cpu_island, m68000, __VA_ARGS__)
+#else
+#define M68K_SIGNAL(...) G_PGM_SIGNAL(m68000, __VA_ARGS__)
+#endif
+
 uint32_t M68K::GetPC()
 {
-    return G_PGM_SIGNAL(m68000, excUnit, PcL) |
-           (G_PGM_SIGNAL(m68000, excUnit, PcH) << 16);
+    return M68K_SIGNAL(excUnit, PcL) |
+           (M68K_SIGNAL(excUnit, PcH) << 16);
 }
 
 M68KRegisters M68K::GetRegisters()
@@ -23,8 +30,8 @@ M68KRegisters M68K::GetRegisters()
     M68KRegisters regs;
     for( int i = 0; i < 17; i++ )
     {
-        regs.r[i] = G_PGM_SIGNAL(m68000, excUnit, regs68L)[i] |
-            (G_PGM_SIGNAL(m68000, excUnit, regs68H)[i] << 16);
+        regs.r[i] = M68K_SIGNAL(excUnit, regs68L)[i] |
+            (M68K_SIGNAL(excUnit, regs68H)[i] << 16);
     }
 
     return regs;

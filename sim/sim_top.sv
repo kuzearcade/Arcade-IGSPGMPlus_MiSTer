@@ -198,6 +198,7 @@ wire nvram_wr = nvram_dl && ioctl_wr && ~|ioctl_addr[26:17];
 // Instantiate the PGM module
 PGM #(.SS_VERSION(`SIM_SS_VERSION)) pgm_inst(
     .clk_50m(clk),
+    .clk_cpu(clk),
     .reset(reset | rom_load_busy),
     .game(board_cfg.game),
     .board_flags(board_cfg.flags),
