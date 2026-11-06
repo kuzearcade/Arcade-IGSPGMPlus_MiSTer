@@ -65,6 +65,8 @@ module IGS026_X #(parameter int SS_IDX = -1)(
     input logic ics2115_irq,
     input logic ics2115_ready,
 
+    input  [7:0] bgm_status,      // espgalarr: ADX stream player status (Z80 I/O 0x88xx)
+
     ssbus_if.slave ssbus
 );
 
@@ -148,6 +150,7 @@ always_comb begin
                 1: z80_dout = latch[6][7:0];
                 2: z80_dout = latch[1][7:0];
                 4: z80_dout = latch[2][7:0];
+                8: z80_dout = bgm_status;
             endcase
         end else begin
             aram_lds_n = z80_wr_n | ~z80_addr[0];

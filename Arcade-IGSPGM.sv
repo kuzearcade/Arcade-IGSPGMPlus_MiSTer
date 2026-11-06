@@ -184,9 +184,8 @@ assign VGA_DISABLE = 0;
 assign HDMI_FREEZE = 0;
 assign HDMI_BLACKOUT = 0;
 
-assign AUDIO_R = AUDIO_L;
 assign AUDIO_S = 1;
-assign AUDIO_MIX = 3;
+assign AUDIO_MIX = status[52:51];      // stereo since the espgalarr BGM stream (default: no mix)
 
 assign LED_DISK = 0;
 assign LED_POWER = 0;
@@ -223,6 +222,7 @@ localparam CONF_STR = {
     "O[38],OSD Pause,No,Yes;",
     "O[39],Pause Dim,Yes,No;",
     "O[47],DB15 SNAC,Off,On;",
+    "O[52:51],Stereo Mix,None,25%,50%,100%;",
     "-;",
     "O[45],Autosave Backup RAM,Off,On;",
     "T[46],Save Backup RAM;",
@@ -760,6 +760,7 @@ PGM #(.SS_VERSION(SS_VERSION)) pgm_inst(
     .coin(coin),
 
     .audio_out(AUDIO_L),
+    .audio_out_r(AUDIO_R),
 
     .sdr_cpu_addr(sdr_cpu_addr),
     .sdr_cpu_q(sdr_cpu_dout),

@@ -73,7 +73,8 @@ module PGM #(
 
     ddr_if.to_host    ddr,
 
-    output logic [15:0] audio_out,
+    output logic [15:0] audio_out,      // left (the ICS2115 mix + the BGM stream's left)
+    output logic [15:0] audio_out_r,
     input       [1:0] audio_filter_en,
 
     input             ss_do_save,
@@ -104,7 +105,7 @@ module PGM #(
 wire clk = clk_50m;
 
 ddr_if ddr_ss(), ddr_arm(), ddr_prot(), ddr_iram(), ddr_share0(), ddr_share1(),
-       ddr_lo(), ddr_lo2(), ddr_lo3(), ddr_lo4();
+       ddr_lo(), ddr_lo2(), ddr_lo3(), ddr_lo4(), ddr_lo5(), ddr_bgm();
 
 // DDR arbitration (priority: savestates > external ARM ROM > protection ROM
 // cache > internal RAM cache > shared-RAM chip caches).  Each protection memory
@@ -138,7 +139,13 @@ ddr_mux ddr_mux_lo4(
     .clk,
     .x(ddr_lo4),
     .a(ddr_share0),
-    .b(ddr_share1)
+    .b(ddr_lo5)
+);
+ddr_mux ddr_mux_lo5(       // espgalarr: the BGM stream player last (54 KB/s, prefetched)
+    .clk,
+    .x(ddr_lo5),
+    .a(ddr_share1),
+    .b(ddr_bgm)
 );
 
 /////////////////////////////
@@ -1323,6 +1330,7 @@ IGS026_X #(.SS_IDX(SSIDX_IGS026_X)) igs026_x(
     .z80_addr,
     .z80_din(z80_dout),
     .z80_dout(z80_din),
+    .bgm_status,
 
     .ics2115_reset_n,
     .ics2115_addr,
@@ -1647,10 +1655,74 @@ ics2115 #(.SS_IDX(SSIDX_ICS2115)) ics2115(
 );
 
 
-always_comb begin
-    logic [17:0] audio_combined;
-    audio_combined = {{2{ics2115_audio_left[15]}}, ics2115_audio_left } + {{2{ics2115_audio_right[15]}}, ics2115_audio_right};
-    audio_out = audio_combined[17:2];
+//////////////////////////////////////////////////////////////////////////////////////////////
+// espgalarr lossless BGM: the PS2's ADX streams (MRA <rom index="2"> at DDR 0x34000000) played by
+// adx_stream at Z80 I/O 0x8800-0x880F: 0 W track / R status (bit 0 playing, 1 looped, 2 paused),
+// 1 W command (1 play, 2 stop, 3 pause, 4 resume), 2 / 3 W volume left / right (0x80 = unity).
+// (The stream's state is not in savestates yet.)
+wire bgm_io = ~z80_iorq_n && z80_addr[11:8] == 4'h8;
+reg        bgm_wr_d;
+reg  [3:0] bgm_track;
+reg  [7:0] bgm_vol_l, bgm_vol_r;
+reg        bgm_play, bgm_stop, bgm_pause;
+reg [10:0] bgm_div;
+wire       bgm_tick = bgm_div == 11'd1249;          // clk 60 MHz / 1250 = 48 kHz
+wire signed [15:0] bgm_l, bgm_r;
+wire       bgm_playing, bgm_underrun, bgm_looped;
+wire [7:0] bgm_status = {5'd0, bgm_pause, bgm_looped, bgm_playing};
+
+always_ff @(posedge clk) begin
+    bgm_div <= bgm_tick ? 11'd0 : bgm_div + 11'd1;
+    bgm_wr_d <= bgm_io & ~z80_wr_n;
+    bgm_play <= 0;
+    bgm_stop <= 0;
+    if (reset) begin
+        bgm_track <= 0;
+        bgm_vol_l <= 8'h80;
+        bgm_vol_r <= 8'h80;
+        bgm_pause <= 0;
+        bgm_stop <= 1;
+    end else if (bgm_io & ~z80_wr_n & ~bgm_wr_d) begin
+        case (z80_addr[3:0])
+            4'h0: bgm_track <= z80_dout[3:0];
+            4'h1: case (z80_dout)
+                8'd1: begin bgm_play <= 1; bgm_pause <= 0; end
+                8'd2: bgm_stop <= 1;
+                8'd3: bgm_pause <= 1;
+                8'd4: bgm_pause <= 0;
+                default: ;
+            endcase
+            4'h2: bgm_vol_l <= z80_dout;
+            4'h3: bgm_vol_r <= z80_dout;
+            default: ;
+        endcase
+    end
+end
+
+adx_stream_ddr #(.BASE(32'h3400_0000)) bgm_stream(
+    .clk, .reset,
+    .tick(bgm_tick),
+    .cmd_play(bgm_play), .cmd_track(bgm_track), .cmd_stop(bgm_stop),
+    .pause(bgm_pause | paused),
+    .ddr(ddr_bgm),
+    .out_l(bgm_l), .out_r(bgm_r),
+    .playing(bgm_playing), .underrun(bgm_underrun), .looped(bgm_looped)
+);
+
+// mix: the ICS2115 as before ((L + R) / 4, both sides) + the BGM at volume / 0x100 (provisional
+// balance: half scale at the driver's 0x80 until the PS2's BGM:SFX ratio is measured), saturated
+function automatic [15:0] sat16(input signed [19:0] v);
+    sat16 = (v > 20'sd32767) ? 16'h7fff : (v < -20'sd32768) ? 16'h8000 : v[15:0];
+endfunction
+
+always_ff @(posedge clk) begin
+    logic signed [17:0] ics;
+    logic signed [24:0] bl, br;
+    ics = {{2{ics2115_audio_left[15]}}, ics2115_audio_left} + {{2{ics2115_audio_right[15]}}, ics2115_audio_right};
+    bl = bgm_l * $signed({1'b0, bgm_vol_l});
+    br = bgm_r * $signed({1'b0, bgm_vol_r});
+    audio_out   <= sat16(20'(ics >>> 2) + 20'(bl >>> 8));
+    audio_out_r <= sat16(20'(ics >>> 2) + 20'(br >>> 8));
 end
 
 logic [15:0] io_q;
