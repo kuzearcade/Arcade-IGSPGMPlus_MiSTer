@@ -613,8 +613,8 @@ always_ff @(posedge clk) begin
     isl_sv_d  <= isl_sv_s[1];
 
     if (~isl_busy) begin
-        if (isl_req_s[1] != isl_seen) begin
-            isl_seen <= isl_req_s[1];
+        if (isl_req_s[0] != isl_seen) begin       // first stage: a timed crossing (shared VCO)
+            isl_seen <= isl_req_s[0];
             sh_addr  <= isl_addr;
             sh_ds_n  <= isl_ds_n;
             sh_rw    <= isl_rw;
@@ -626,8 +626,8 @@ always_ff @(posedge clk) begin
         end
     end else begin
         if (isl_cnt != 3'd7) isl_cnt <= isl_cnt + 3'd1;
-        // at least three clocks for the block-RAM-backed devices, then their DTACK/ready
-        if (isl_cnt >= 3'd2 && ~dtack_n && igs027a_share_ready && xram_e_ready) begin
+        // two clocks for the block-RAM-backed devices, then their DTACK
+        if (isl_cnt >= 3'd1 && ~dtack_n && igs027a_share_ready && xram_e_ready) begin
             isl_din  <= cpu_data_in;
             sh_as_n  <= 1;
             sh_ds_n  <= 2'b11;
@@ -644,6 +644,9 @@ wire [14:0] isl_xd_addr;
 wire [15:0] isl_xd_d, isl_xd_q;
 wire        isl_xd_we_u_n, isl_xd_we_l_n;
 wire [15:0] isl_nvram_q_word;
+wire        isl_xe_rd, isl_xe_we_u, isl_xe_we_l, isl_xe_ready;
+wire [16:1] isl_xe_addr;
+wire [15:0] isl_xe_d, isl_xe_q;
 
 // NVRAM writes cross as a toggle with the address and byte held
 reg         nv_wr_t = 0;
@@ -692,6 +695,8 @@ cpu_island cpu_island(
     .wram_d(isl_wram_d), .wram_q(isl_wram_q),
     .xd_addr(isl_xd_addr), .xd_we_u_n(isl_xd_we_u_n), .xd_we_l_n(isl_xd_we_l_n),
     .xd_d(isl_xd_d), .xd_q(isl_xd_q),
+    .xe_rd(isl_xe_rd), .xe_we_u(isl_xe_we_u), .xe_we_l(isl_xe_we_l), .xe_addr(isl_xe_addr),
+    .xe_d(isl_xe_d), .xe_q(isl_xe_q), .xe_ready(isl_xe_ready),
 
     .nvram_wr_t_sys(nv_wr_t), .nvram_waddr(nv_waddr), .nvram_wdata(nv_wdata),
     .nvram_raddr(nvram_addr), .nvram_q_word(isl_nvram_q_word)
@@ -976,7 +981,43 @@ m68k_ram_ss_adaptor #(.WIDTHAD(15), .SS_IDX(SSIDX_XRAM_D)) xram_d_ss(
 
 `endif
 
-`ifdef ESPGALARR_CORE
+`ifdef CPU_ISLAND
+`ifndef ESPGALARR_CORE
+initial $fatal(1, "CPU_ISLAND needs ESPGALARR_CORE (the IGS027A also uses ddr_share0/1)");
+`endif
+// the 0xe00000 RAM's cache is on the CPU clock (rtl/xram_e_island.sv); misses cross to DDR,
+// savestate accesses cross from here
+wire [15:0] xram_e_q = 16'd0;    // read on the CPU side
+assign xram_e_ready = 1'b1;
+
+ddr_if ddr_xe();
+wire        xe_ss_req, xe_ss_wr, xe_ss_ack;
+wire [14:0] xe_ss_addr;
+wire [31:0] xe_ss_wdata, xe_ss_rdata;
+
+xram_e_island xram_e(
+    .clk(clk_cpu),
+    .reset_sys(isl_reset_r),
+    .cpu_rd(isl_xe_rd), .cpu_we_u(isl_xe_we_u), .cpu_we_l(isl_xe_we_l),
+    .cpu_addr(isl_xe_addr), .cpu_din(isl_xe_d), .cpu_q(isl_xe_q), .cpu_ready(isl_xe_ready),
+    .ss_req_sys(xe_ss_req), .ss_wr(xe_ss_wr), .ss_addr(xe_ss_addr), .ss_wdata(xe_ss_wdata),
+    .ss_ack(xe_ss_ack), .ss_rdata(xe_ss_rdata),
+    .ddr(ddr_xe)
+);
+
+ddr_cdc xram_e_ddr_cdc(
+    .clk_a(clk_cpu), .a(ddr_xe),
+    .clk_b(clk), .b(ddr_share0)
+);
+ddr_idle xram_e_ddr_idle(.ddr(ddr_share1));
+
+xram_e_ss_bridge #(.SS_IDX(SSIDX_XRAM_E)) xram_e_ss(
+    .clk, .reset, .ss_paused,
+    .ssbus(ssb[SSIDX_XRAM_E]),
+    .ss_req(xe_ss_req), .ss_wr(xe_ss_wr), .ss_addr(xe_ss_addr), .ss_wdata(xe_ss_wdata),
+    .ss_ack_cpu(xe_ss_ack), .ss_rdata(xe_ss_rdata)
+);
+`elsif ESPGALARR_CORE
 wire [15:0] xram_e_q;
 espgalarr_xram #(.SS_IDX(SSIDX_XRAM_E)) xram_e(
     .clk, .reset,

@@ -22,12 +22,15 @@ import system_consts::*;
 // zero-wait: the program ROM cache (SDRAM behind it), the work RAM at 0x800000 and the
 // 0xd00000 RAM (their CPU ports; the 60 MHz ports serve the sprite DMA and savestates).
 //
+// The 0xe00000 RAM's cache (xram_e_island) is on this clock too; only its misses go to DDR.
+//
 // Every other access crosses to the 60 MHz system as a request (toggle) carrying the bus
 // cycle; PGM.sv replays it there as a 68k bus cycle on the existing device logic and returns
 // the read data with an acknowledge (toggle).  The CPU waits on DTACK (VPA for an interrupt
 // acknowledge) meanwhile.  The payload registers are stable from before each toggle until
 // after its acknowledge, so only the toggles are timed across the clocks; the payloads are
-// false paths (Arcade-IGSPGM.sdc).
+// false paths (Arcade-IGSPGM.sdc).  The bridge and ROM handshakes use their first synchroniser
+// stage directly: the clocks share a VCO, so the crossing is a timed register-to-register path.
 //
 // Other games keep 20 MHz: the CPU takes a phase every other clock.
 module cpu_island (
@@ -76,6 +79,15 @@ module cpu_island (
     output            xd_we_l_n,
     output     [15:0] xd_d,
     input      [15:0] xd_q,
+
+    // 0xe00000 RAM (xram_e_island: a cache in front of DDR, also on this clock)
+    output            xe_rd,
+    output            xe_we_u,
+    output            xe_we_l,
+    output     [16:1] xe_addr,
+    output     [15:0] xe_d,
+    input      [15:0] xe_q,
+    input             xe_ready,
 
     // NVRAM (the work RAM): writes arrive as a toggle with a held address/byte, reads use
     // the (slowly changing) HPS address; the word read back is held in nvram_q_word.
@@ -156,7 +168,7 @@ fx68k m68000(
 //////////////////////////////////
 //// Decode (the same decoder as the system side, on the CPU's own address)
 
-logic ROMn, WORKRAMn, XRAM_Dn, SS_SAVEn, SS_RESETn, SS_VECn;
+logic ROMn, WORKRAMn, XRAM_Dn, XRAM_En, SS_SAVEn, SS_RESETn, SS_VECn;
 
 address_translator address_translator(
     .game,
@@ -164,7 +176,7 @@ address_translator address_translator(
     .cpu_word_addr,
     .ss_override(ovr_s[1]),
     .WORKRAMn, .ROMn, .IOn(), .IGS023n(), .IGS026_Xn(), .IGS025n(), .IGS022_RAMn(),
-    .ARM_SHAREn(), .ARM_LATCHn(), .ARM_NMIn(), .XRAM_Dn, .XRAM_En(),
+    .ARM_SHAREn(), .ARM_LATCHn(), .ARM_NMIn(), .XRAM_Dn, .XRAM_En,
     .SS_SAVEn, .SS_RESETn, .SS_VECn
 );
 
@@ -173,7 +185,8 @@ wire ss_region = ~SS_SAVEn | ~SS_RESETn | ~SS_VECn;
 wire rom_sel   = ~ROMn & ~ss_region & ~iack;
 wire wram_sel  = ~WORKRAMn & ~ss_region & ~iack;
 wire xd_sel    = ~XRAM_Dn & ~ss_region & ~iack;
-wire fast      = rom_sel | wram_sel | xd_sel;
+wire xe_sel    = ~XRAM_En & ~ss_region & ~iack;
+wire fast      = rom_sel | wram_sel | xd_sel | xe_sel;
 wire ds_low    = ~&cpu_ds_n;
 
 //////////////////////////////////
@@ -228,7 +241,7 @@ always_ff @(posedge clk_cpu) begin
                 sdr_req  <= ~sdr_req;
                 rc_state <= RC_WAIT;
             end
-            RC_WAIT: if (sdr_ack_s[1] == sdr_req) begin
+            RC_WAIT: if (sdr_ack_s[0] == sdr_req) begin
                 cache_data[fill_index] <= sdr_data;
                 cache_tag[fill_index]  <= fill_tag;
                 rc_state <= RC_SETTLE;
@@ -257,6 +270,12 @@ always_ff @(posedge clk_cpu) begin
     nv_rd_addr_d <= nvram_raddr;
     if (nv_rd_d && nv_rd_addr_d == nvram_raddr) nvram_q_word <= wram_q;
 end
+
+assign xe_rd     = ~cpu_as_n & xe_sel & cpu_rw;
+assign xe_we_u   = ~cpu_as_n & xe_sel & ~cpu_rw & ~cpu_ds_n[1];
+assign xe_we_l   = ~cpu_as_n & xe_sel & ~cpu_rw & ~cpu_ds_n[0];
+assign xe_addr   = cpu_addr[15:0];
+assign xe_d      = cpu_data_out;
 
 assign xd_addr   = cpu_addr[14:0];
 assign xd_d      = cpu_data_out;
@@ -288,7 +307,7 @@ always_ff @(posedge clk_cpu) begin
             bridge_req  <= ~bridge_req;
             pending     <= 1;
             done        <= 0;
-        end else if (pending & ~done & (ack_s[1] == bridge_req)) begin
+        end else if (pending & ~done & (ack_s[0] == bridge_req)) begin
             done <= 1;
             bridge_din_r <= bridge_din;
         end else if (pending & done & (cpu_as_n | ~ds_low)) begin
@@ -308,9 +327,10 @@ always_ff @(posedge clk_cpu) begin
     cpu_din_r <= rom_sel  ? rom_word :
                  wram_sel ? wram_q :
                  xd_sel   ? xd_q :
+                 xe_sel   ? xe_q :
                             bridge_din_r;
 
-    dtack_n_r <= ~(~cpu_as_n & ((rom_sel & rom_hit) | wram_sel | xd_sel | (~fast & ~iack & pending & done)));
+    dtack_n_r <= ~(~cpu_as_n & ((rom_sel & rom_hit) | wram_sel | xd_sel | (xe_sel & ds_low & xe_ready) | (~fast & ~iack & pending & done)));
     vpa_n_r   <= ~(~cpu_as_n & iack & pending & done);
 end
 

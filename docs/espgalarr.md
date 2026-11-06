@@ -63,37 +63,46 @@ the same bullet samples in stages 3-6 as at 1x).
 - **CPU_ISLAND (rtl/cpu_island.sv, qsf macro):**
   - **Clocking:** fx68k runs on clk_cpu, one phase per clock, so the 68k is at 40 MHz. Other
     games take a phase every other clock (20 MHz).
-  - **Fast memories on the CPU clock, zero-wait:** the program ROM cache (2048 x 8-byte lines,
-    looked up every clock, SDRAM channel 3 behind it), and the CPU ports of the work RAM and the
-    0xd00000 RAM. Both RAMs are m68k_ram_dp2, one clock per port. Their 60 MHz ports serve the
-    sprite DMA and savestates.
+  - **Fast memories on the CPU clock, zero-wait on a hit:**
+    - The program ROM cache (2048 x 8-byte lines, looked up every clock, SDRAM channel 3
+      behind it).
+    - The CPU ports of the work RAM and the 0xd00000 RAM. Both RAMs are m68k_ram_dp2, one clock
+      per port. Their 60 MHz ports serve the sprite DMA and savestates.
+    - The 0xe00000 RAM's write-back cache (rtl/xram_e_island.sv: one ram_cache, 512 x 32-byte
+      lines). Its misses reach DDR through ddr_cdc; savestate accesses cross as toggles.
   - **NVRAM:** loads and saves use the work RAM's CPU port in the clocks the CPU leaves free.
   - **Bridge for every other access:** a request toggle carries the bus cycle to the 60 MHz
     side, which replays it as a 68k bus cycle (the cpu_* signals in PGM.sv). So the IGS023, I/O,
-    Z80 latch, the DDR-backed 0xe00000 RAM and the savestate hooks are unchanged.
+    Z80 latch and the savestate hooks are unchanged.
   - **Bridge return path:** the read data comes back with an acknowledge toggle. The CPU
     waits on DTACK, or VPA for an interrupt acknowledge.
-  - **Constraints:** the toggles cross through two-flop synchronisers (timed). The payloads are
-    false paths in Arcade-IGSPGM.sdc.
+  - **Constraints:** the clocks share a VCO, so each toggle crossing is a timed
+    register-to-register path. The bridge and ROM handshakes use the first synchroniser stage
+    directly; the 60 MHz side holds a replayed cycle two clocks before taking DTACK. The
+    payloads are false paths in Arcade-IGSPGM.sdc.
   - **Savestate hooks:** the sequencer's "supervisor program read" checks also take the
     ROM-cache fetches, which the CPU signals with `sv_fetch`.
 - **SDRAM controller:** 3 clocks ACTIVE->READ/WRITE (tRCD); 7 clocks READ->ACTIVE (tRP after
   the auto-precharge); 6 clocks WRITE->ACTIVE; 9 clocks REFRESH->ACTIVE (tRFC).
-- **Fit (2026-11-05):** timing met in every corner (worst setup +0.48 ns on clk_cpu), 553/553
-  RAM blocks, 61% ALMs.
+- **Fit (2026-11-05):** timing met in every corner (worst setup +0.13 ns on clk_cpu), 553/553
+  RAM blocks, 60% ALMs.
 
 **Measured speed.** One full attract cycle (three demos and the logo screens), MAME with the
 68k scaled vs the board (one screenshot a second, 13-14 cycles):
 
-| 68k | MAME 1x | 1.25x | 1.5x | 1.75x | 2x | board 30 MHz build | board 40 MHz (island) |
-|---|---|---|---|---|---|---|---|
-| cycle | 181.8 s | 168.5 s | 164.5 s | 162.6 s | 161.9 s | 165.8 s (about 1.4x) | 162.8 s (about 1.7x) |
+| Run | Cycle | Effective 68k speed |
+|---|---|---|
+| MAME 1x / 1.25x / 1.5x / 1.75x / 2x | 181.8 / 168.5 / 164.5 / 162.6 / 161.9 s | |
+| Board, 20 MHz build | 184.1 s | about 0.95x |
+| Board, 30 MHz build | 165.8 s | about 1.4x |
+| Board, island, 0xe00000 bridged | 162.8 s | about 1.7x |
+| Board, island, 0xe00000 on the CPU clock | 162.4 s | 1.8x or more |
 
-The island loses about 15% to its bridged accesses: about 3 extra clocks a cycle, mostly to
-the 0xe00000 RAM. MAME lag by stage: at 1.5x stages 2-6 lag 2.9 / 4.0 / 10.1 / 9.4 / 10.5% of
+The demos barely lag above 1.75x, so this test cannot tell 1.8x from 2x. MAME lag by stage: at 1.5x stages 2-6 lag 2.9 / 4.0 / 10.1 / 9.4 / 10.5% of
 the frames; at 2x 1.0 / 1.7 / 6.2 / 3.9 / 4.1%.
 
-The sim builds the island with `make CPU_ISLAND=1` (clk_cpu = the system clock there).
+The sim does not build the island: CPU_ISLAND needs ESPGALARR_CORE, which the sim's C++ does not
+support (it reads the IGS022).
 
 ## Tested on the board (192.168.1.138, 2026-11-05)
 
