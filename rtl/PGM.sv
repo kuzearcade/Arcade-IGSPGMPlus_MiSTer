@@ -1724,20 +1724,21 @@ adx_stream_ddr #(.BASE(32'h3400_0000), .SS_IDX(SSIDX_BGM)) bgm_stream(
     .ss_ext_load(bgm_ss_ext_load)
 );
 
-// mix: the ICS2115 as before ((L + R) / 4, both sides) + the BGM at volume / 0x100 (provisional
-// balance: half scale at the driver's 0x80 until the PS2's BGM:SFX ratio is measured), saturated
+// mix: the ICS2115 as before ((L + R) / 4, both sides) + the BGM at volume * 286 / 0x10000
+// (0.5586 at the driver's 0x80): the PS2's BGM : SFX ratio (4.59 in no-input stage 1, PCSX2 SPU2
+// dump) measured on the board against the HDMI capture (4.11 at volume / 0x100), saturated
 function automatic [15:0] sat16(input signed [19:0] v);
     sat16 = (v > 20'sd32767) ? 16'h7fff : (v < -20'sd32768) ? 16'h8000 : v[15:0];
 endfunction
 
 always_ff @(posedge clk) begin
     logic signed [17:0] ics;
-    logic signed [24:0] bl, br;
+    logic signed [33:0] bl, br;
     ics = {{2{ics2115_audio_left[15]}}, ics2115_audio_left} + {{2{ics2115_audio_right[15]}}, ics2115_audio_right};
-    bl = bgm_l * $signed({1'b0, bgm_vol_l});
-    br = bgm_r * $signed({1'b0, bgm_vol_r});
-    audio_out   <= sat16(20'(ics >>> 2) + 20'(bl >>> 8));
-    audio_out_r <= sat16(20'(ics >>> 2) + 20'(br >>> 8));
+    bl = bgm_l * $signed({1'b0, bgm_vol_l}) * 34'sd286;
+    br = bgm_r * $signed({1'b0, bgm_vol_r}) * 34'sd286;
+    audio_out   <= sat16(20'(ics >>> 2) + 20'(bl >>> 16));
+    audio_out_r <= sat16(20'(ics >>> 2) + 20'(br >>> 16));
 end
 
 logic [15:0] io_q;
