@@ -28,10 +28,11 @@ replaces the stock PGM core:
 
 ## Lossless BGM (`rtl/adx_stream.sv`)
 
-With an `espgalarr build --bgm adx` ROM set the soundtrack is the PS2's own: its Arrange ADX
-streams, verbatim (`espgalarr_bgm.bin`, 129 MB), played at 48 kHz stereo, full length, with the
-tracks' loop points. The u-law build (`--bgm ulaw`, the default until this is released) does
-not use it.
+With an espgalarr ROM set (the build's default, `--bgm adx`) the soundtrack is the PS2's own: its
+Arrange ADX streams, verbatim (`espgalarr_bgm.bin`, 129 MB), played at 48 kHz stereo, full
+length, with the tracks' loop points. The release MRA (releases/espgalarr) loads it; a
+`--bgm ulaw` build (music in the sample ROM, for plain PGM hardware) has no espgalarr_bgm.bin, so
+its MRA must leave out the `<rom index="2">` element.
 
 - **Loading:** a second MRA `<rom index="2" address="0x34000000">` element: Main_MiSTer writes the
   blob straight into DDR3 (about 11 s more per boot); the core ignores download index 2. The
