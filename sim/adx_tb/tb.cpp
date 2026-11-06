@@ -1,7 +1,13 @@
 // adx_stream testbench: tb BLOB TRACK SAMPLES OUT [TICK_CLOCKS] [SEED]
 // Plays TRACK of the BGM blob through rtl/adx_stream.sv with a memory model of random latency
 // (BASE 0x34000000) and writes one int16 L/R pair per tick to OUT. Prints underrun / loop flags.
+#ifdef DDR_TB
+#include "Vadx_ddr_tb_top.h"
+typedef Vadx_ddr_tb_top Top;
+#else
 #include "Vadx_stream.h"
+typedef Vadx_stream Top;
+#endif
 #include "verilated.h"
 #include <cstdio>
 #include <cstdlib>
@@ -23,7 +29,7 @@ int main(int argc, char** argv) {
     srand(argc > 6 ? atoi(argv[6]) : 1);
     const uint32_t BASE = 0x34000000;
 
-    Vadx_stream* t = new Vadx_stream;
+    Top* t = new Top;
     auto clk = [&]() { t->clk = 0; t->eval(); t->clk = 1; t->eval(); };
     t->reset = 1; clk(); clk(); t->reset = 0;
     t->cmd_track = track; t->cmd_play = 1; clk(); t->cmd_play = 0;
@@ -32,6 +38,22 @@ int main(int argc, char** argv) {
     long got = 0, cyc = 0, max_wait = 0;
     std::vector<int16_t> pairs; pairs.reserve(1 << 20);
     while (got < samples) {
+#ifdef DDR_TB
+        // DDR: busy now and then; a read (taken when not busy) answers after 5..60 clocks
+        static int pend = -1; static uint32_t paddr;
+        t->ddr_rdata_ready = 0;
+        t->ddr_busy = (rand() % 8) == 0;
+        if (pend > 0 && --pend == 0) {
+            uint32_t a = paddr - BASE; uint64_t w = 0;
+            if (a + 8 <= mem.size()) for (int i = 7; i >= 0; i--) w = (w << 8) | mem[a + i];
+            t->ddr_rdata = w; t->ddr_rdata_ready = 1; t->ddr_busy = 0; pend = -1;
+        }
+        if (t->ddr_read && !t->ddr_busy && pend < 0 && !t->ddr_rdata_ready) {
+            if (!t->ddr_acquire) { fprintf(stderr, "read without acquire\n"); return 1; }
+            if (t->ddr_burstcnt != 1) { fprintf(stderr, "burst %d\n", t->ddr_burstcnt); return 1; }
+            paddr = t->ddr_addr; pend = 5 + rand() % 56;
+        }
+#else
         // memory: ack a held request after a random latency (1..40 clocks; sometimes 300)
         t->mem_ack = 0;
         if (t->mem_req) {
@@ -43,6 +65,7 @@ int main(int argc, char** argv) {
                 t->mem_data = w; t->mem_ack = 1; busy = false;
             }
         } else busy = false;
+#endif
         t->tick = (cyc % tick_clocks) == 0 && cyc > 0;
         bool was_tick = t->tick && t->playing;   // (decodes the next sample on this edge)
         clk();
