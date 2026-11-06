@@ -40,7 +40,7 @@
 		<part>04 00800000 00180000</part>
 		<part name="cave_t04801w064.u19"/>
 
-		<!-- CART MUSIC (12 MB, ICS @0x400000: original SFX + the Arrange soundtrack) -->
+		<!-- CART MUSIC (12 MB, ICS @0x400000: original SFX + the Arrange voices) -->
 		<part>05 00c00000 00400000</part>
 		<part name="cave_w04801b032.u17"/>
 
@@ -52,6 +52,11 @@
 		<!-- B ROM (sprite mask) -->
 		<part>07 00800000 00000000</part>
 		<part name="cave_b04801w064.u1"/>
+	</rom>
+	<!-- the Arrange soundtrack: the PS2's ADX streams (espgalarr build --bgm adx), placed by
+	     Main_MiSTer straight into DDR3 for the core's stream player (rtl/adx_stream.sv) -->
+	<rom index="2" address="0x34000000" zip="espgalarr.zip">
+		<part name="espgalarr_bgm.bin"/>
 	</rom>
 	<nvram index="8" size="131072"/>
 </misterromdescription>
