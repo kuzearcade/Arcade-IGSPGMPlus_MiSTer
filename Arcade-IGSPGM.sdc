@@ -47,6 +47,8 @@ set_false_path -from [get_registers {*hps_io|ioctl_addr*}] -to $_cpu_clk
 set_false_path -from [get_registers {*cpu_island|nvram_q_word*}]
 # static while the core runs (set at ROM load)
 set_false_path -from [get_registers {*board_cfg* *cart_present* *cart_prog_base* *cart_tile_base* *cart_music_base*}] -to $_cpu_clk
+# the ROM loader's SDRAM channel select: changes only while loading, with the CPU held in reset
+set_false_path -from [get_registers {*rom_load_busy_r}] -to $_cpu_clk
 # the 0xe00000 RAM's cache on the CPU clock: DDR misses (ddr_cdc) and savestate accesses
 # cross as toggles; their payloads are held across them
 set_false_path -from [get_registers {*xram_e_ddr_cdc|addr_a* *xram_e_ddr_cdc|wdata_a* *xram_e_ddr_cdc|be_a* *xram_e_ddr_cdc|rd_a}]

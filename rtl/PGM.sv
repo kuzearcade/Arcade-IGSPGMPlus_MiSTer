@@ -1658,13 +1658,14 @@ ics2115 #(.SS_IDX(SSIDX_ICS2115)) ics2115(
 //////////////////////////////////////////////////////////////////////////////////////////////
 // espgalarr lossless BGM: the PS2's ADX streams (MRA <rom index="2"> at DDR 0x34000000) played by
 // adx_stream at Z80 I/O 0x8800-0x880F: 0 W track / R status (bit 0 playing, 1 looped, 2 paused),
-// 1 W command (1 play, 2 stop, 3 pause, 4 resume), 2 / 3 W volume left / right (0x80 = unity).
-// (The stream's state is not in savestates yet.)
+// 1 W command (1 play, 2 stop, 3 pause, 4 resume, 5 fade out), 2 / 3 W volume left / right
+// (0x80 = unity). The player applies the PS2's stream volume and fades (adx_stream.sv).
+// Savestates: slot SSIDX_BGM (the stream's state + these registers; the frames are re-fetched).
 wire bgm_io = ~z80_iorq_n && z80_addr[11:8] == 4'h8;
 reg        bgm_wr_d;
 reg  [3:0] bgm_track;
 reg  [7:0] bgm_vol_l, bgm_vol_r;
-reg        bgm_play, bgm_stop, bgm_pause;
+reg        bgm_play, bgm_stop, bgm_fade, bgm_pause;
 reg [10:0] bgm_div;
 wire       bgm_tick = bgm_div == 11'd1249;          // clk 60 MHz / 1250 = 48 kHz
 wire signed [15:0] bgm_l, bgm_r;
@@ -1676,6 +1677,7 @@ always_ff @(posedge clk) begin
     bgm_wr_d <= bgm_io & ~z80_wr_n;
     bgm_play <= 0;
     bgm_stop <= 0;
+    bgm_fade <= 0;
     if (reset) begin
         bgm_track <= 0;
         bgm_vol_l <= 8'h80;
@@ -1690,6 +1692,7 @@ always_ff @(posedge clk) begin
                 8'd2: bgm_stop <= 1;
                 8'd3: bgm_pause <= 1;
                 8'd4: bgm_pause <= 0;
+                8'd5: bgm_fade <= 1;
                 default: ;
             endcase
             4'h2: bgm_vol_l <= z80_dout;
@@ -1697,16 +1700,28 @@ always_ff @(posedge clk) begin
             default: ;
         endcase
     end
+    if (bgm_ss_ext_load) begin
+        bgm_vol_l <= bgm_ss_ext_out[7:0];
+        bgm_vol_r <= bgm_ss_ext_out[15:8];
+        bgm_track <= bgm_ss_ext_out[19:16];
+        bgm_pause <= bgm_ss_ext_out[20];
+    end
 end
 
-adx_stream_ddr #(.BASE(32'h3400_0000)) bgm_stream(
+wire [63:0] bgm_ss_ext_out;
+wire        bgm_ss_ext_load;
+adx_stream_ddr #(.BASE(32'h3400_0000), .SS_IDX(SSIDX_BGM)) bgm_stream(
     .clk, .reset,
     .tick(bgm_tick),
-    .cmd_play(bgm_play), .cmd_track(bgm_track), .cmd_stop(bgm_stop),
+    .cmd_play(bgm_play), .cmd_track(bgm_track), .cmd_stop(bgm_stop), .cmd_fade(bgm_fade),
     .pause(bgm_pause | paused),
     .ddr(ddr_bgm),
-    .out_l(bgm_l), .out_r(bgm_r),
-    .playing(bgm_playing), .underrun(bgm_underrun), .looped(bgm_looped)
+    .out_l(), .out_r(), .gout_l(bgm_l), .gout_r(bgm_r),   // (at the PS2's stream volume / fades)
+    .playing(bgm_playing), .underrun(bgm_underrun), .looped(bgm_looped),
+    .ssbus(ssb[SSIDX_BGM]),
+    .ss_ext_in({43'd0, bgm_pause, bgm_track, bgm_vol_r, bgm_vol_l}),
+    .ss_ext_out(bgm_ss_ext_out),
+    .ss_ext_load(bgm_ss_ext_load)
 );
 
 // mix: the ICS2115 as before ((L + R) / 4, both sides) + the BGM at volume / 0x100 (provisional

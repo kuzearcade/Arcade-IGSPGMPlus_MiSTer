@@ -9,6 +9,6 @@ $(OBJ)/Vadx_stream: ../../rtl/adx_stream.sv tb.cpp
 
 # the same through adx_stream_ddr + adx_ddr_port on a ddr_if model
 ddr: obj_ddr/Vadx_ddr_tb_top
-obj_ddr/Vadx_ddr_tb_top: ../../rtl/adx_stream.sv ../../rtl/ddram.sv adx_ddr_tb_top.sv tb.cpp
+obj_ddr/Vadx_ddr_tb_top: ../../rtl/adx_stream.sv ../../rtl/ddram.sv ../../rtl/savestates.sv adx_ddr_tb_top.sv tb.cpp
 	verilator --cc --exe --build -O3 -Wno-fatal -Wno-lint -Wno-style --Mdir obj_ddr -CFLAGS -DDDR_TB \
-	  --top-module adx_ddr_tb_top ../../rtl/ddram.sv ../../rtl/adx_stream.sv adx_ddr_tb_top.sv tb.cpp -o Vadx_ddr_tb_top
+	  --top-module adx_ddr_tb_top ../../rtl/ddram.sv ../../rtl/savestates.sv ../../rtl/adx_stream.sv adx_ddr_tb_top.sv tb.cpp -o Vadx_ddr_tb_top
