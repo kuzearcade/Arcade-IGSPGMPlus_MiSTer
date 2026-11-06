@@ -112,8 +112,15 @@ support (it reads the IGS022).
   `ESPGAL_FORCE_STAGE=5 ESPGAL_INVINCIBLE=1`) draws full screens of hundreds of bullets plus the
   boss and its parts. In the busy opening stretch the HUD disappears in some screenshots; MAME
   running the same ROM hides it in the same scenes, so this is the game's own behaviour.
-- **40 MHz island core:** boots and runs the attract loop (above for its speed); a full game,
-  savestates and NVRAM saving are not checked yet on it.
+- **40 MHz island core:** boots and runs the attract loop (above for its speed) and a game.
+- **Sound:** the 60 MHz builds before the ICS2115 enable fix were silent (HDMI capture RMS 0;
+  the 20 MHz core and the fixed build about 1600 in the attract demo). The ICS2115 had to run on
+  every clock, not on ce_50m.
+- **Savestates (2026-11-06, fixed build):** Alt+F1 saves and F1 restores the saved scene. The
+  game keeps running after both, and the .ss file is written to savestates/Arcade/. Before the
+  fix a save hung on the ICS2115 slot (the 20 MHz core was fine).
+- **NVRAM:** OSD "Save Backup RAM" writes config/nvram/<mra name>.nvm (128KB, the work RAM, low
+  byte first per word; it matches MAME's work RAM layout). The core boots with it present.
 - **Enemy silhouettes:** solid black/blue silhouettes and garbled strips on some Arrange enemies (stage 1 demo, the stage 2 train) are
   in MAME too, frame for frame: the conversion's ROM data, not the core.
 - **Not checked yet:** savestates, and audio over a long run.

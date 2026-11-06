@@ -470,7 +470,8 @@ wire clocks_enabled = ss_cpu_execute | ~paused;
 
 // The system clock is 60 MHz (it was 50 MHz) so the 68k can run at 30 MHz: fx68k takes one
 // phase per clock.  Every other timing is derived from ce_50m, a 50 MHz enable, so video,
-// sound and the 20 MHz 68k of the other games keep their exact rates.
+// sound and the 20 MHz 68k of the other games keep their exact rates.  (The ICS2115's internal
+// sequencing runs on every clock instead: its rates come from ce_33m.)
 wire ce_dummy_25m;
 jtframe_frac_cen #(2) cen_50m
 (
@@ -1617,7 +1618,10 @@ wire ics2115_ss_ready;
 ics2115 #(.SS_IDX(SSIDX_ICS2115)) ics2115(
     .clk,
     .ce(ce_33m & clocks_enabled),
-    .ce_50m(ce_50m & (clocks_enabled || !ics2115_ss_ready)),
+    // every system clock, not ce_50m: the sequencer's one-clock osc_start pulse is only seen on
+    // an enabled clock, so with ce_50m's gaps (1 clock in 6) a voice start was lost and the
+    // chip hung (no sound, savestates stuck on its slot).  Its rates come from ce_33m.
+    .ce_50m(clocks_enabled || !ics2115_ss_ready),
     .reset_n(ics2115_reset_n),
     .host_addr(ics2115_addr),
     .host_din(ics2115_din),
