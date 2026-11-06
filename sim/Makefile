@@ -7,8 +7,6 @@ ifeq ($(UNAME),Darwin)
 endif
 
 USE_AUTO_SS = 1
-# CPU_ISLAND=1: the 68k in its own clock domain (the espgalarr core's CPU_ISLAND)
-CPU_ISLAND = 0
 OBJ_DIR = obj
 VERILATED_DIR = verilated
 
@@ -93,11 +91,6 @@ HDL_SRC += ../rtl/ics2115/ics2115_pkg.sv ../rtl/ics2115/ics2115.sv ../rtl/ics211
 HDL_SRC += sim_top.sv
 HDL_SRC += verilator.vlt
 
-
-ifeq ($(CPU_ISLAND),1)
-VERILATOR_ARGS += -DCPU_ISLAND
-CPPFLAGS += -DCPU_ISLAND
-endif
 
 ifeq ($(USE_AUTO_SS),1)
 VERILATOR_ARGS += -DUSE_AUTO_SS
