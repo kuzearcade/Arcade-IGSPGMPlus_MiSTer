@@ -37,7 +37,8 @@ package system_consts;
     parameter int SSIDX_VERSION       = 18;   // build-version stamp (informational)
     parameter int SSIDX_XRAM_D        = 19;   // espgalarr: 64KB RAM at 0xd00000 (DDP2 shared-RAM window)
     parameter int SSIDX_XRAM_E        = 20;   // espgalarr: 128KB RAM at 0xe00000
-    parameter int SSIDX_COUNT         = 21;
+    parameter int SSIDX_BGM           = 21;   // espgalarr: ADX stream player (adx_stream.sv)
+    parameter int SSIDX_COUNT         = 22;
 
     parameter bit [31:0] SS_DDR_BASE         = 32'h3E00_0000;
     // Free DDR window (was the sprite A-ROM, now moved to SDRAM).

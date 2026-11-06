@@ -15,6 +15,12 @@ assign ddr_burstcnt = ddr.burstcnt;
 assign ddr.rdata = ddr_rdata;
 assign ddr.busy = ddr_busy;
 assign ddr.rdata_ready = ddr_rdata_ready;
-adx_stream_ddr s(.clk, .reset, .tick, .cmd_play, .cmd_track, .cmd_stop, .pause, .ddr,
-                 .out_l, .out_r, .playing, .underrun, .looped);
+ssbus_if ssb();
+assign ssb.select = 8'hff;
+assign ssb.read = 0;
+assign ssb.write = 0;
+assign ssb.query = 0;
+adx_stream_ddr s(.clk, .reset, .tick, .cmd_play, .cmd_track, .cmd_stop, .cmd_fade(1'b0), .pause, .ddr,
+                 .out_l, .out_r, .gout_l(), .gout_r(), .playing, .underrun, .looped,
+                 .ssbus(ssb), .ss_ext_in(64'd0), .ss_ext_out(), .ss_ext_load());
 endmodule

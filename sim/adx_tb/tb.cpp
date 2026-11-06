@@ -67,12 +67,45 @@ int main(int argc, char** argv) {
         } else busy = false;
 #endif
         t->tick = (cyc % tick_clocks) == 0 && cyc > 0;
+#ifndef DDR_TB
+        static long fade_at = getenv("FADE_AT") ? atol(getenv("FADE_AT")) : -1;
+        t->cmd_fade = (got == fade_at && fade_at >= 0 && !t->tick);
+        if (t->cmd_fade) fade_at = -1;
+        static long play2_at = getenv("PLAY2_AT") ? atol(getenv("PLAY2_AT")) : -1;   // a second track
+        t->cmd_play = (got == play2_at && play2_at >= 0 && !t->tick);
+        if (t->cmd_play) { t->cmd_track = atoi(getenv("PLAY2_TRACK")); play2_at = -1; }
+#endif
         static int rec = -1;                     // the decode pipeline's result: 8 clocks after a playing tick
+#ifndef DDR_TB
+        // savestate test (SS_AT=n): after n samples save the state, play another track for a
+        // while (not recorded), restore, and go on recording: the output must run on unbroken
+        static long ss_at = getenv("SS_AT") ? atol(getenv("SS_AT")) : -1;
+        static int ss_phase = 0; static long ss_wait = 0; static uint64_t ss_w[6];
+        t->ss_wr = 0;
+        if (ss_phase == 0 && got == ss_at && rec < 0) {
+            for (int k = 0; k < 6; k++) ss_w[k] = ((uint64_t)t->ss_words[2 * k + 1] << 32) | t->ss_words[2 * k];
+            t->cmd_track = (track + 1) % 11; t->cmd_play = 1; clk(); t->cmd_play = 0; t->cmd_track = track;
+            ss_phase = 1; ss_wait = 200000 + rand() % 50000;
+        } else if (ss_phase == 1 && --ss_wait == 0) {
+            ss_phase = 2; ss_wait = 0;
+        } else if (ss_phase == 2) {
+            t->ss_wr = 1; t->ss_widx = ss_wait; t->ss_wdata = ss_w[ss_wait];
+            if (++ss_wait == 6) ss_phase = 3;
+        }
+        if (ss_phase == 1 || ss_phase == 2) rec = -1;
+        if (t->tick && t->playing && ss_phase != 1 && ss_phase != 2) rec = 8;
+#else
         if (t->tick && t->playing) rec = 8;
+#endif
         clk();
         cyc++;
         if (rec > 0 && --rec == 0) {
-            pairs.push_back((int16_t)t->out_l); pairs.push_back((int16_t)t->out_r);
+#ifndef DDR_TB
+            static bool gout = getenv("GOUT") != nullptr;
+            if (gout) { pairs.push_back((int16_t)t->gout_l); pairs.push_back((int16_t)t->gout_r); }
+            else
+#endif
+            { pairs.push_back((int16_t)t->out_l); pairs.push_back((int16_t)t->out_r); }
             got++;
             if (pairs.size() >= (1 << 20)) { fwrite(pairs.data(), 2, pairs.size(), out); pairs.clear(); }
         }

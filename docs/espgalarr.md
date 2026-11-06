@@ -24,6 +24,38 @@ replaces the stock PGM core:
   snapshot. That gives 1656 sprites.
 - **Program and sound ROMs:** a plain 4MB program ROM and a 12MB sample ROM (ICS 0x400000+).
   No protection chip.
+- **BGM stream player (lossless BGM):** Z80 I/O 0x8800-0x880F; see below.
+
+## Lossless BGM (`rtl/adx_stream.sv`)
+
+With an `espgalarr build --bgm adx` ROM set the soundtrack is the PS2's own: its Arrange ADX
+streams, verbatim (`espgalarr_bgm.bin`, 129 MB), played at 48 kHz stereo, full length, with the
+tracks' loop points. The u-law build (`--bgm ulaw`, the default until this is released) does
+not use it.
+
+- **Loading:** a second MRA `<rom index="2" address="0x34000000">` element: Main_MiSTer writes the
+  blob straight into DDR3 (about 11 s more per boot); the core ignores download index 2. The
+  main stream must stay below 128 MiB (hps_io keeps 27 bits of the length).
+- **Registers (Z80 I/O):** 0x8800 W track / R status (bit 0 playing, 1 looped, 2 paused);
+  0x8801 W command (1 play, 2 stop, 3 pause, 4 resume, 5 fade out); 0x8802 / 0x8803 W volume
+  left / right (0x80 = unity). The Z80 driver writes them (espgalarr asm/z80/adxstream.z80).
+- **Decoder:** the PS2's arithmetic (CRI ADXB): `s = clamp16(((7400 h1 - 3342 h2) >> 12) +
+  nibble * ((word & 0x1FFF) + 1))`, a 4-cycle pipeline, one stereo sample per 1250 clocks
+  (clk_sys / 1250 = 48 kHz, locked to the MiSTer audio clock). At the loop end the history saved
+  at the loop start is restored; the loop end is exclusive. The loop start's frame is kept in a
+  register, so the jump never waits on DDR.
+- **Volume and fades:** the PS2's stream manager's: game volume 220 of 256 (-1 dB), a fade
+  takes 4 off it every 800 samples in whole dB (CRI's Q12 gain table: -1 dB = 3648 / 4096),
+  a play request while a stream plays fades it out and then starts the new track. All of it is
+  bit-exact against PCSX2's SPU2 input (espgalarr spec/lossless-bgm.md).
+- **DDR:** `adx_stream_ddr` is the last leaf of the DDR mux (single-beat reads, about 54 KB/s).
+- **Mix:** each side = the ICS2115's (L + R) / 4 + the BGM x volume / 0x100, saturated; OSD
+  Stereo Mix (status[52:51]). The BGM : SFX balance against the PS2's is still being set.
+- **Savestates:** slot SSIDX_BGM: the stream's position, histories, fade state and the port
+  registers; the frames are fetched again after a restore.
+- **Tests:** sim/adx_tb (Verilator): `make`, `make LOOP_RESTORE=0`, `make LOOP_END_INCL=1`,
+  `make ddr`; espgalarr's work/scratch/audiospike/adxcmp.py compares a track against the
+  reference decoder (all 11 tracks bit-exact through their loops, savestate restore, fades).
 
 ## Sprite engine (`igs023_sprite.sv`, `igs023_buffer.sv`, `igs023_brom_cache.sv`)
 
@@ -123,4 +155,7 @@ support (it reads the IGS022).
   byte first per word; it matches MAME's work RAM layout). The core boots with it present.
 - **Enemy silhouettes:** solid black/blue silhouettes and garbled strips on some Arrange enemies (stage 1 demo, the stage 2 train) are
   in MAME too, frame for frame: the conversion's ROM data, not the core.
-- **Not checked yet:** savestates, and audio over a long run.
+- **Lossless BGM (2026-11-06):** with the lossless MRA the title track plays after a coin,
+  sample-locked to the reference decode (HDMI capture, constant alignment over 33 s; through
+  MiSTer's default output filter). The normal (u-law) entry sounds as before on this core.
+- **Not checked yet:** audio over a long run; the lossless BGM's fades and savestates on the board.

@@ -14,6 +14,12 @@
 //  Memory: 64-bit reads, byte address mem_addr (8-aligned), mem_req held until mem_ack (one
 //  cycle, mem_data valid); byte i of a word is mem_data[8*i +: 8] (DDR3 as the HPS writes it).
 //  Reference: espgalarr/ps2/adx.py decode_exact().
+//
+//  Volume and fades as the PS2's stream manager (ELF 0x12D8B0): a stream plays at game volume
+//  220 of 256 (-1 dB); a fade takes 4 off every 60 Hz frame (800 samples) with the CRI volume
+//  trunc(-20 log10(256 / v)) dB (gain table below), then stops; a play request while a stream plays fades it out
+//  and starts the new track after. gout_l / gout_r carry that gain; out_l / out_r are the raw
+//  decode (the bit-exact tests).
 //============================================================================
 
 module adx_stream #(
@@ -30,6 +36,7 @@ module adx_stream #(
     input               cmd_play,       // start cmd_track from its beginning
     input         [3:0] cmd_track,
     input               cmd_stop,
+    input               cmd_fade,       // fade out (55 frames), then stop
     input               pause,
 
     output reg   [31:0] mem_addr,
@@ -39,9 +46,18 @@ module adx_stream #(
 
     output reg signed [15:0] out_l,
     output reg signed [15:0] out_r,
+    output reg signed [15:0] gout_l,    // out_l / out_r at the PS2's stream volume (fades)
+    output reg signed [15:0] gout_r,
     output              playing,
     output reg          underrun,       // a frame was not fetched in time (sticky until play)
-    output reg          looped          // the loop jump happened (sticky until play)
+    output reg          looped,         // the loop jump happened (sticky until play)
+
+    // savestates (adx_stream_ddr's ssbus slot): 6 x 64-bit words of state; the frames are not
+    // saved (a restored S_PLAY re-fetches the current and the loop start's frames)
+    output [383:0]      ss_words,
+    input               ss_wr,
+    input         [2:0] ss_widx,
+    input        [63:0] ss_wdata
 );
 
 // ---- track parameters ----------------------------------------------------------------------
@@ -75,7 +91,7 @@ reg          fbusy;
 
 // ---- main state ------------------------------------------------------------------------------
 typedef enum logic [3:0] {
-    S_IDLE, S_DIR, S_HDR0, S_HDR1, S_HDR4, S_HDR5, S_HDR6, S_FIRST, S_LOOPF, S_PLAY
+    S_IDLE, S_DIR, S_HDR0, S_HDR1, S_HDR4, S_HDR5, S_HDR6, S_FIRST, S_LOOPF, S_PLAY, S_RESUME
 } state_t;
 state_t st;
 assign playing = (st == S_PLAY);
@@ -105,6 +121,66 @@ reg signed [15:0] d_a1, d_a2, d_b1, d_b2;
 reg  [12:0]       d_scl, d_scr;      // scale word & 0x1FFF (+1 in stage 3)
 reg  [7:0]        d_nbl, d_nbr;
 reg signed [31:0] m1l, m2l, mnl, m1r, m2r, mnr;
+reg               ss_was_playing;
+
+// PS2 stream volume: v = 4 * fv (fv 55 = 220 = -1 dB). The CRI player's gain, measured on the
+// PCSX2 SPU2 input (bit-exact over the stage 1 fade and the boss track's loop): Q12
+// k = int(4096 * 10^(dB / 20)) & ~15 with dB = trunc(-20 log10(256 / v)); out = (s * k) >> 12
+reg  [5:0] fv;
+reg        fading, queued;
+reg  [3:0] qtrack;
+reg  [9:0] fcnt;
+reg        fade_start;                // start the queued track (end of a fade)
+
+function automatic [11:0] fade_gain(input [5:0] k);
+    case (k)
+    0: fade_gain = 12'd0;
+    1: fade_gain = 12'd64;
+    2: fade_gain = 12'd128;
+    3: fade_gain = 12'd192;
+    4: fade_gain = 12'd256;
+    5: fade_gain = 12'd320;
+    6: fade_gain = 12'd400;
+    7: fade_gain = 12'd448;
+    8: fade_gain = 12'd512;
+    9: fade_gain = 12'd576;
+    10: fade_gain = 12'd640;
+    11: fade_gain = 12'd720;
+    12: fade_gain = 12'd816;
+    13, 14: fade_gain = 12'd912;
+    15, 16: fade_gain = 12'd1024;
+    17, 18: fade_gain = 12'd1152;
+    19, 20: fade_gain = 12'd1280;
+    21, 22: fade_gain = 12'd1440;
+    23, 24, 25: fade_gain = 12'd1616;
+    26, 27, 28: fade_gain = 12'd1824;
+    29, 30, 31, 32: fade_gain = 12'd2048;
+    33, 34, 35: fade_gain = 12'd2288;
+    36, 37, 38, 39, 40: fade_gain = 12'd2576;
+    41, 42, 43, 44, 45: fade_gain = 12'd2896;
+    46, 47, 48, 49, 50: fade_gain = 12'd3248;
+    default: fade_gain = 12'd3648;
+    endcase
+endfunction
+
+reg [11:0] gain;
+always_ff @(posedge clk) begin
+    logic signed [28:0] gl, gr;
+    gain <= fade_gain(fv);
+    gl = out_l * $signed({1'b0, gain});
+    gr = out_r * $signed({1'b0, gain});
+    gout_l <= gl[27:12];
+    gout_r <= gr[27:12];
+end
+
+assign ss_words = {
+    {h1_l, h2_l, h1_r, h2_r},                                                   // 5
+    {sv1_l, sv2_l, sv1_r, sv2_r},                                               // 4
+    {loop_end, 5'd0, cur_f},                                                    // 3
+    {n_samples, loop_start},                                                    // 2
+    {trk_base, data_start},                                                     // 1
+    {2'd0, fcnt, qtrack, queued, fading, fv, (st == S_PLAY || st == S_RESUME) ? 4'd1 : 4'd0, has_loop, saved, looped, underrun, pos}  // 0
+};
 
 
 always_ff @(posedge clk) begin
@@ -117,7 +193,12 @@ always_ff @(posedge clk) begin
         underrun <= 0;
         looped <= 0;
         dph <= 2'd0;
+        fv <= 6'd55;
+        fading <= 0;
+        queued <= 0;
+        fade_start <= 0;
     end else begin
+        fade_start <= 0;
         // ---- fetch engine (frames) ----
         if (fbusy && mem_ack) begin
             fbuf <= {mem_data, fbuf[383:64]};
@@ -204,12 +285,30 @@ always_ff @(posedge clk) begin
             end
         end
         S_LOOPF: if (!fbusy) begin
-            // then prefetch frame 1 (S_PLAY issues it when it is needed)
-            nxt_f <= 27'd1;
-            faddr <= data_start + 32'd36;
-            mem_addr <= (data_start + 32'd36) & ~32'd7;
+            // then prefetch the frame after cur (S_PLAY issues it when it is needed)
+            nxt_f <= cur_f + 27'd1;
+            faddr <= data_start + 32'd36 * {5'd0, cur_f + 27'd1};
+            mem_addr <= (data_start + 32'd36 * {5'd0, cur_f + 27'd1}) & ~32'd7;
             fcount <= 0;
             st <= S_PLAY;
+        end
+        S_RESUME: begin
+            // after a savestate restore: fetch the current frame, then the loop start's (S_LOOPF)
+            if (!fbusy && !nxt_ok && !mem_req) begin
+                mem_req <= 1;
+                fbusy <= 1;
+            end
+            if (nxt_ok) begin
+                cur <= nxt;
+                nxt_ok <= 0;
+                to_lpf <= 1;
+                faddr <= data_start + 32'd36 * {5'd0, loop_start[31:5]};
+                mem_addr <= (data_start + 32'd36 * {5'd0, loop_start[31:5]}) & ~32'd7;
+                fcount <= 0;
+                mem_req <= has_loop;
+                fbusy <= has_loop;
+                st <= S_LOOPF;
+            end
         end
         S_PLAY: begin
             if (!fbusy && !nxt_ok && !mem_req && need_nxt) begin
@@ -220,6 +319,13 @@ always_ff @(posedge clk) begin
             // 1 the jump, 2 the bytes / history / frame swap, 3 the products, 4 sum and clamp
             case (dph)
             2'd0: if (tick && !pause) begin
+                if (fading) begin
+                    fcnt <= (fcnt == 10'd799) ? 10'd0 : fcnt + 10'd1;
+                    if (fcnt == 10'd799) begin
+                        fv <= fv - 6'd1;
+                        if (fv == 6'd1) fade_start <= 1;      // the end of the fade (below)
+                    end
+                end
                 d_jump <= (pos == end_pos);
                 d_p <= (pos == end_pos) ? loop_start : pos;
                 dph <= 2'd1;
@@ -305,17 +411,84 @@ always_ff @(posedge clk) begin
             fbusy <= 0;
             out_l <= 0;
             out_r <= 0;
+            fading <= 0;
+            queued <= 0;
         end
-        if (cmd_play) begin
+        if (cmd_fade && st != S_IDLE && !fading) begin
+            fading <= 1;
+            fcnt <= 0;
+        end
+        // a play request while a stream plays: fade it out, then the new track (the PS2's)
+        if (cmd_play && st != S_IDLE) begin
+            queued <= 1;
+            qtrack <= cmd_track;
+            if (!fading) begin
+                fading <= 1;
+                fcnt <= 0;
+            end
+        end
+        if ((cmd_play && st == S_IDLE) || fade_start) begin
+            // the fade has ended (fv 0): the queued track, else silence
             dph <= 2'd0;
-            mem_addr <= BASE + 32'd8 + {25'd0, cmd_track, 3'd0};
-            mem_req <= 1;
-            fbusy <= 0;
-            underrun <= 0;
-            looped <= 0;
+            fading <= 0;
+            queued <= 0;
+            fv <= 6'd55;
             out_l <= 0;
             out_r <= 0;
-            st <= S_DIR;
+            if (fade_start && !queued) begin
+                st <= S_IDLE;
+                mem_req <= 0;
+                fbusy <= 0;
+            end else begin
+                mem_addr <= BASE + 32'd8 + {25'd0, fade_start ? qtrack : cmd_track, 3'd0};
+                mem_req <= 1;
+                fbusy <= 0;
+                underrun <= 0;
+                looped <= 0;
+                st <= S_DIR;
+            end
+        end
+
+        if (ss_wr) begin
+            case (ss_widx)
+            3'd0: begin
+                pos <= ss_wdata[31:0];
+                underrun <= ss_wdata[32];
+                looped <= ss_wdata[33];
+                saved <= ss_wdata[34];
+                has_loop <= ss_wdata[35];
+                // a playing stream resumes after the last word (5): its frames are fetched again
+                ss_was_playing <= ss_wdata[36];
+                fv <= ss_wdata[45:40];
+                fading <= ss_wdata[46];
+                queued <= ss_wdata[47];
+                qtrack <= ss_wdata[51:48];
+                fcnt <= ss_wdata[61:52];
+                st <= S_IDLE;
+                mem_req <= 0;
+                fbusy <= 0;
+                nxt_ok <= 0;
+                to_lpf <= 0;
+                dph <= 2'd0;
+            end
+            3'd1: begin trk_base <= ss_wdata[63:32]; data_start <= ss_wdata[31:0]; end
+            3'd2: begin n_samples <= ss_wdata[63:32]; loop_start <= ss_wdata[31:0]; end
+            3'd3: begin
+                loop_end <= ss_wdata[63:32];
+                cur_f <= ss_wdata[26:0];
+                // S_RESUME fetches frame cur_f into nxt
+                nxt_f <= ss_wdata[26:0];
+                faddr <= data_start + 32'd36 * {5'd0, ss_wdata[26:0]};
+                mem_addr <= (data_start + 32'd36 * {5'd0, ss_wdata[26:0]}) & ~32'd7;
+                fcount <= 0;
+            end
+            3'd4: begin sv1_l <= ss_wdata[63:48]; sv2_l <= ss_wdata[47:32]; sv1_r <= ss_wdata[31:16]; sv2_r <= ss_wdata[15:0]; end
+            3'd5: begin
+                h1_l <= ss_wdata[63:48]; h2_l <= ss_wdata[47:32]; h1_r <= ss_wdata[31:16]; h2_r <= ss_wdata[15:0];
+                st <= ss_was_playing ? S_RESUME : S_IDLE;
+            end
+            default: ;
+            endcase
         end
     end
 end
@@ -377,7 +550,8 @@ endmodule
 module adx_stream_ddr #(
     parameter bit [31:0] BASE = 32'h3400_0000,
     parameter bit LOOP_RESTORE = 1,
-    parameter bit LOOP_END_INCL = 0
+    parameter bit LOOP_END_INCL = 0,
+    parameter int SS_IDX = -1
 )(
     input               clk,
     input               reset,
@@ -385,23 +559,59 @@ module adx_stream_ddr #(
     input               cmd_play,
     input         [3:0] cmd_track,
     input               cmd_stop,
+    input               cmd_fade,
     input               pause,
     ddr_if.to_host      ddr,
     output signed [15:0] out_l,
     output signed [15:0] out_r,
+    output signed [15:0] gout_l,
+    output signed [15:0] gout_r,
     output              playing,
     output              underrun,
-    output              looped
+    output              looped,
+
+    // savestates: the stream's 6 state words + one word of the caller's (the port registers)
+    ssbus_if.slave      ssbus,
+    input        [63:0] ss_ext_in,
+    output reg   [63:0] ss_ext_out,
+    output reg          ss_ext_load
 );
+
+wire [383:0] ss_words;
+reg          ss_wr;
+reg    [2:0] ss_widx;
+reg   [63:0] ss_wdata;
+
+always_ff @(posedge clk) begin
+    ssbus.setup(SS_IDX, 7, 3);           // 7 x 64-bit words
+    ss_wr <= 0;
+    ss_ext_load <= 0;
+    if (ssbus.access(SS_IDX)) begin
+        if (ssbus.write) begin
+            if (ssbus.addr == 6) begin
+                ss_ext_out <= ssbus.data;
+                ss_ext_load <= 1;
+            end else begin
+                ss_wr <= 1;
+                ss_widx <= ssbus.addr[2:0];
+                ss_wdata <= ssbus.data;
+            end
+            ssbus.write_ack(SS_IDX);
+        end else if (ssbus.read) begin
+            ssbus.read_response(SS_IDX, ssbus.addr == 6 ? ss_ext_in : ss_words[64 * ssbus.addr[2:0] +: 64]);
+        end
+    end
+end
 
 wire [31:0] mem_addr;
 wire        mem_req, mem_ack;
 wire [63:0] mem_data;
 
 adx_stream #(.BASE(BASE), .LOOP_RESTORE(LOOP_RESTORE), .LOOP_END_INCL(LOOP_END_INCL)) stream(
-    .clk, .reset, .tick, .cmd_play, .cmd_track, .cmd_stop, .pause,
+    .clk, .reset, .tick, .cmd_play, .cmd_track, .cmd_stop, .cmd_fade, .pause,
     .mem_addr, .mem_req, .mem_ack, .mem_data,
-    .out_l, .out_r, .playing, .underrun, .looped);
+    .out_l, .out_r, .gout_l, .gout_r, .playing, .underrun, .looped,
+    .ss_words, .ss_wr, .ss_widx, .ss_wdata);
 
 adx_ddr_port port(.clk, .reset, .mem_addr, .mem_req, .mem_ack, .mem_data, .ddr);
 
