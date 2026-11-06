@@ -6,8 +6,10 @@
 //  18-byte frames, 2 channels, 48 kHz, header version 4).  One stereo sample per `tick`
 //  (48 kHz), decoded with the PS2's arithmetic (CRI ADXB, ELF 0x27CD3C):
 //      s = clamp16(((C1 * h1 + C2 * h2) >>> 12) + nibble * scale),  scale = (word & 0x1FFF) + 1
-//  The track loops from its loop end to its loop start as its header says (LOOP_RESTORE = 1:
-//  the predictor history saved at the loop start is restored at the jump; 0: it carries on).
+//  The track loops from its loop end to its loop start as its header says. LOOP_RESTORE = 1 (the
+//  PS2's: PCSX2 run at the boss track's seam, decoder entry state 0x2ECE88 at ELF 0x27D294) restores
+//  the predictor history saved at the loop start; 0 carries it on. LOOP_END_INCL = 1 also plays
+//  the header's loop end sample (every track has samples = loop end + 1; not yet checked on the PS2).
 //
 //  Memory: 64-bit reads, byte address mem_addr (8-aligned), mem_req held until mem_ack (one
 //  cycle, mem_data valid); byte i of a word is mem_data[8*i +: 8] (DDR3 as the HPS writes it).
@@ -18,7 +20,8 @@ module adx_stream #(
     parameter bit [31:0] BASE = 32'h3400_0000,
     parameter int C1 = 7400,             // cutoff 500 Hz at 48 kHz (EE RAM 0x2ECE90)
     parameter int C2 = -3342,
-    parameter bit LOOP_RESTORE = 0
+    parameter bit LOOP_RESTORE = 1,
+    parameter bit LOOP_END_INCL = 0
 )(
     input               clk,
     input               reset,
@@ -44,24 +47,25 @@ module adx_stream #(
 // ---- track parameters ----------------------------------------------------------------------
 reg [31:0] trk_base, data_start, n_samples, loop_start, loop_end;
 reg        has_loop;
-wire [31:0] end_pos = has_loop ? loop_end : n_samples;
+wire [31:0] end_pos = has_loop ? loop_end + 32'(LOOP_END_INCL) : n_samples;
 
 // ---- frames: current (decoding) and next (prefetched), 36 bytes each (L 0..17, R 18..35) ----
 reg [287:0] cur, nxt;
+reg [287:0] lpf;                 // the loop start's frame, fetched once at the track start (the jump
+                                 // never waits: the frame holding the loop end may be used for 1 sample)
 reg  [26:0] cur_f;               // frame number of cur
-reg  [26:0] nxt_f;               // frame number being / been fetched into nxt
+reg  [26:0] nxt_f;               // frame number being / been fetched into nxt (cur_f + 1)
 reg         nxt_ok;              // nxt holds frame nxt_f
+reg         to_lpf;              // the fetch in flight fills lpf
 reg  [31:0] pos;                 // next sample to decode
 
 function automatic [7:0] fbyte(input [287:0] f, input int i);
     fbyte = f[8*i +: 8];
 endfunction
 
-// the frame needed after frame f: the loop start's when the jump comes in or at the end of f
-function automatic [26:0] after(input [26:0] f);
-    after = (has_loop && loop_end <= {f + 27'd1, 5'd0}) ? loop_start[31:5] : f + 27'd1;
-endfunction
-wire last_frame = !has_loop && n_samples <= {cur_f + 27'd1, 5'd0};
+// cur is the last frame before the end (no loop) or before the jump (from lpf): nothing to fetch
+wire need_nxt = !(n_samples <= {cur_f + 27'd1, 5'd0} && !has_loop) &&
+                !(has_loop && end_pos <= {cur_f + 27'd1, 5'd0});
 
 // ---- fetch engine: 6 words from the 8-aligned address below a frame (36 bytes at any offset) -
 reg  [383:0] fbuf;
@@ -71,7 +75,7 @@ reg          fbusy;
 
 // ---- main state ------------------------------------------------------------------------------
 typedef enum logic [3:0] {
-    S_IDLE, S_DIR, S_HDR0, S_HDR1, S_HDR4, S_HDR5, S_HDR6, S_FIRST, S_PLAY
+    S_IDLE, S_DIR, S_HDR0, S_HDR1, S_HDR4, S_HDR5, S_HDR6, S_FIRST, S_LOOPF, S_PLAY
 } state_t;
 state_t st;
 assign playing = (st == S_PLAY);
@@ -118,8 +122,13 @@ always_ff @(posedge clk) begin
             if (fcount == 3'd5) begin
                 mem_req <= 0;
                 fbusy <= 0;
-                nxt <= 288'({mem_data, fbuf[383:64]} >> (8 * faddr[2:0]));
-                nxt_ok <= 1;
+                if (to_lpf)
+                    lpf <= 288'({mem_data, fbuf[383:64]} >> (8 * faddr[2:0]));
+                else begin
+                    nxt <= 288'({mem_data, fbuf[383:64]} >> (8 * faddr[2:0]));
+                    nxt_ok <= 1;
+                end
+                to_lpf <= 0;
             end
         end
 
@@ -165,6 +174,7 @@ always_ff @(posedge clk) begin
             fcount <= 0;
             nxt_f <= 0;
             nxt_ok <= 0;
+            to_lpf <= 0;
             st <= S_FIRST;
         end
         S_FIRST: begin
@@ -178,17 +188,27 @@ always_ff @(posedge clk) begin
                 pos <= 0;
                 h1_l <= 0; h2_l <= 0; h1_r <= 0; h2_r <= 0;
                 saved <= 0;
-                // prefetch frame 1 (or the loop start's)
                 nxt_ok <= 0;
-                nxt_f <= after(27'd0);
-                faddr <= data_start + 32'd36 * {5'd0, after(27'd0)};
-                mem_addr <= (data_start + 32'd36 * {5'd0, after(27'd0)}) & ~32'd7;
+                // fetch the loop start's frame into lpf
+                to_lpf <= 1;
+                faddr <= data_start + 32'd36 * {5'd0, loop_start[31:5]};
+                mem_addr <= (data_start + 32'd36 * {5'd0, loop_start[31:5]}) & ~32'd7;
                 fcount <= 0;
-                st <= S_PLAY;
+                mem_req <= has_loop;
+                fbusy <= has_loop;
+                st <= S_LOOPF;
             end
         end
+        S_LOOPF: if (!fbusy) begin
+            // then prefetch frame 1 (S_PLAY issues it when it is needed)
+            nxt_f <= 27'd1;
+            faddr <= data_start + 32'd36;
+            mem_addr <= (data_start + 32'd36) & ~32'd7;
+            fcount <= 0;
+            st <= S_PLAY;
+        end
         S_PLAY: begin
-            if (!fbusy && !nxt_ok && !mem_req && !last_frame) begin
+            if (!fbusy && !nxt_ok && !mem_req && need_nxt) begin
                 mem_req <= 1;
                 fbusy <= 1;
             end
@@ -204,13 +224,13 @@ always_ff @(posedge clk) begin
                     out_l <= 0;
                     out_r <= 0;
                     st <= S_IDLE;
-                end else if (f != cur_f && !(nxt_ok && nxt_f == f)) begin
+                end else if (!jump && f != cur_f && !(nxt_ok && nxt_f == f)) begin
                     underrun <= 1;                    // hold the output, try again next tick
                 end else begin
                     logic [287:0] fr;
                     logic signed [15:0] a1, a2, b1, b2, sl, sr;
                     logic [4:0] i;
-                    fr = (f != cur_f) ? nxt : cur;
+                    fr = jump ? lpf : (f != cur_f) ? nxt : cur;
                     i = p[4:0];
                     a1 = h1_l; a2 = h2_l; b1 = h1_r; b2 = h2_r;
                     if (jump) begin
@@ -228,14 +248,14 @@ always_ff @(posedge clk) begin
                     h1_l <= sl; h2_l <= a1;
                     h1_r <= sr; h2_r <= b1;
                     pos <= p + 32'd1;
-                    if (f != cur_f) begin
-                        // move to the prefetched frame and fetch the one after it
-                        cur <= nxt;
+                    if (jump || f != cur_f) begin
+                        // move to the prefetched (or loop start's) frame; fetch the one after it
+                        cur <= fr;
                         cur_f <= f;
                         nxt_ok <= 0;
-                        nxt_f <= after(f);
-                        faddr <= data_start + 32'd36 * {5'd0, after(f)};
-                        mem_addr <= (data_start + 32'd36 * {5'd0, after(f)}) & ~32'd7;
+                        nxt_f <= f + 27'd1;
+                        faddr <= data_start + 32'd36 * {5'd0, f + 27'd1};
+                        mem_addr <= (data_start + 32'd36 * {5'd0, f + 27'd1}) & ~32'd7;
                         fcount <= 0;
                     end
                 end
@@ -263,5 +283,90 @@ always_ff @(posedge clk) begin
         end
     end
 end
+
+endmodule
+
+// adx_stream's read port on a ddr_if client (single-beat reads, `acquire` held for each read)
+module adx_ddr_port(
+    input               clk,
+    input               reset,
+
+    input        [31:0] mem_addr,
+    input               mem_req,
+    output reg          mem_ack,
+    output reg   [63:0] mem_data,
+
+    ddr_if.to_host      ddr
+);
+
+assign ddr.burstcnt = 8'd1;
+assign ddr.byteenable = 8'hff;
+assign ddr.write = 0;
+assign ddr.wdata = 64'd0;
+
+reg [1:0] st;   // 0 idle, 1 issue, 2 wait, 3 done (mem_req drops or moves on)
+
+always_ff @(posedge clk) begin
+    mem_ack <= 0;
+    if (reset) begin
+        st <= 0;
+        ddr.acquire <= 0;
+        ddr.read <= 0;
+    end else case (st)
+    0: if (mem_req && !mem_ack) begin
+        ddr.acquire <= 1;
+        st <= 1;
+    end
+    1: if (!ddr.busy) begin
+        ddr.addr <= {mem_addr[31:3], 3'd0};
+        ddr.read <= 1;
+        st <= 2;
+    end
+    2: if (!ddr.busy) begin
+        ddr.read <= 0;
+        if (ddr.rdata_ready) begin
+            mem_data <= ddr.rdata;
+            mem_ack <= 1;
+            ddr.acquire <= 0;
+            st <= 0;
+        end
+    end
+    default: st <= 0;
+    endcase
+end
+
+endmodule
+
+// adx_stream on a ddr_if (what the core instantiates; also the DDR testbench's top)
+module adx_stream_ddr #(
+    parameter bit [31:0] BASE = 32'h3400_0000,
+    parameter bit LOOP_RESTORE = 1,
+    parameter bit LOOP_END_INCL = 0
+)(
+    input               clk,
+    input               reset,
+    input               tick,
+    input               cmd_play,
+    input         [3:0] cmd_track,
+    input               cmd_stop,
+    input               pause,
+    ddr_if.to_host      ddr,
+    output signed [15:0] out_l,
+    output signed [15:0] out_r,
+    output              playing,
+    output              underrun,
+    output              looped
+);
+
+wire [31:0] mem_addr;
+wire        mem_req, mem_ack;
+wire [63:0] mem_data;
+
+adx_stream #(.BASE(BASE), .LOOP_RESTORE(LOOP_RESTORE), .LOOP_END_INCL(LOOP_END_INCL)) stream(
+    .clk, .reset, .tick, .cmd_play, .cmd_track, .cmd_stop, .pause,
+    .mem_addr, .mem_req, .mem_ack, .mem_data,
+    .out_l, .out_r, .playing, .underrun, .looped);
+
+adx_ddr_port port(.clk, .reset, .mem_addr, .mem_req, .mem_ack, .mem_data, .ddr);
 
 endmodule
