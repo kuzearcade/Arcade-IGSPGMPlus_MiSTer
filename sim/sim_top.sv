@@ -255,6 +255,7 @@ PGM #(.SS_VERSION(`SIM_SS_VERSION)) pgm_inst(
     .ddr(ddr_pgm),
     
     .audio_out(audio_out),
+    .audio_out_r(),
     .audio_filter_en(audio_filter_en),
     
     .ss_do_save(ss_do_save),

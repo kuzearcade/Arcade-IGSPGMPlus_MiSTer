@@ -67,10 +67,11 @@ int main(int argc, char** argv) {
         } else busy = false;
 #endif
         t->tick = (cyc % tick_clocks) == 0 && cyc > 0;
-        bool was_tick = t->tick && t->playing;   // (decodes the next sample on this edge)
+        static int rec = -1;                     // the decode pipeline's result: 8 clocks after a playing tick
+        if (t->tick && t->playing) rec = 8;
         clk();
         cyc++;
-        if (was_tick) {
+        if (rec > 0 && --rec == 0) {
             pairs.push_back((int16_t)t->out_l); pairs.push_back((int16_t)t->out_r);
             got++;
             if (pairs.size() >= (1 << 20)) { fwrite(pairs.data(), 2, pairs.size(), out); pairs.clear(); }

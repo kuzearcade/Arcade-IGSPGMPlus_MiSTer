@@ -89,19 +89,22 @@ reg signed [15:0] h1_l, h2_l, h1_r, h2_r;
 reg signed [15:0] sv1_l, sv2_l, sv1_r, sv2_r;   // history saved at the loop start
 reg               saved;
 
-function automatic signed [15:0] adx_sample(input [7:0] s_hi, input [7:0] s_lo, input [7:0] b,
-                                            input odd, input signed [15:0] h1,
-                                            input signed [15:0] h2);
-    logic signed [4:0]  nib;
-    logic signed [14:0] scale;
-    logic signed [31:0] p;
-    logic signed [31:0] s;
-    nib   = odd ? $signed({b[3], b[3:0]}) : $signed({b[7], b[7:4]});
-    scale = $signed({2'b00, s_hi[4:0], s_lo}) + 15'sd1;
-    p     = (32'(C1) * 32'(h1) + 32'(C2) * 32'(h2)) >>> 12;
-    s     = p + 32'(nib) * 32'(scale);
-    adx_sample = (s > 32'sd32767) ? 16'sh7fff : (s < -32'sd32768) ? -16'sh8000 : s[15:0];
+function automatic signed [4:0] nibble(input [7:0] b, input odd);   // high nibble first
+    nibble = odd ? $signed({b[3], b[3:0]}) : $signed({b[7], b[7:4]});
 endfunction
+
+function automatic signed [15:0] clamp16(input signed [31:0] s);
+    clamp16 = (s > 32'sd32767) ? 16'sh7fff : (s < -32'sd32768) ? -16'sh8000 : s[15:0];
+endfunction
+
+// decode pipeline registers
+reg  [1:0]        dph;
+reg               d_jump, d_odd;
+reg  [31:0]       d_p;
+reg signed [15:0] d_a1, d_a2, d_b1, d_b2;
+reg  [12:0]       d_scl, d_scr;      // scale word & 0x1FFF (+1 in stage 3)
+reg  [7:0]        d_nbl, d_nbr;
+reg signed [31:0] m1l, m2l, mnl, m1r, m2r, mnr;
 
 
 always_ff @(posedge clk) begin
@@ -113,6 +116,7 @@ always_ff @(posedge clk) begin
         out_r <= 0;
         underrun <= 0;
         looped <= 0;
+        dph <= 2'd0;
     end else begin
         // ---- fetch engine (frames) ----
         if (fbusy && mem_ack) begin
@@ -212,43 +216,52 @@ always_ff @(posedge clk) begin
                 mem_req <= 1;
                 fbusy <= 1;
             end
-            if (tick && !pause) begin
-                logic [31:0] p;
+            // decode pipeline, one stereo sample per tick (1250 clocks apart on the core):
+            // 1 the jump, 2 the bytes / history / frame swap, 3 the products, 4 sum and clamp
+            case (dph)
+            2'd0: if (tick && !pause) begin
+                d_jump <= (pos == end_pos);
+                d_p <= (pos == end_pos) ? loop_start : pos;
+                dph <= 2'd1;
+            end
+            2'd1: begin
                 logic [26:0] f;
-                logic jump;
-                jump = (pos == end_pos);
-                p = jump ? loop_start : pos;
-                f = p[31:5];
-                if (jump && !has_loop) begin
+                f = d_p[31:5];
+                if (d_jump && !has_loop) begin
                     // end of a track without a loop
                     out_l <= 0;
                     out_r <= 0;
                     st <= S_IDLE;
-                end else if (!jump && f != cur_f && !(nxt_ok && nxt_f == f)) begin
+                    dph <= 2'd0;
+                end else if (!d_jump && f != cur_f && !(nxt_ok && nxt_f == f)) begin
                     underrun <= 1;                    // hold the output, try again next tick
+                    dph <= 2'd0;
                 end else begin
                     logic [287:0] fr;
-                    logic signed [15:0] a1, a2, b1, b2, sl, sr;
+                    logic signed [15:0] a1, a2, b1, b2;
                     logic [4:0] i;
-                    fr = jump ? lpf : (f != cur_f) ? nxt : cur;
-                    i = p[4:0];
+                    logic [7:0] hl, hr;
+                    fr = d_jump ? lpf : (f != cur_f) ? nxt : cur;
+                    i = d_p[4:0];
                     a1 = h1_l; a2 = h2_l; b1 = h1_r; b2 = h2_r;
-                    if (jump) begin
+                    if (d_jump) begin
                         looped <= 1;
                         if (LOOP_RESTORE) begin a1 = sv1_l; a2 = sv2_l; b1 = sv1_r; b2 = sv2_r; end
                     end
-                    if (has_loop && p == loop_start && !saved) begin
+                    if (has_loop && d_p == loop_start && !saved) begin
                         sv1_l <= a1; sv2_l <= a2; sv1_r <= b1; sv2_r <= b2;
                         saved <= 1;
                     end
-                    sl = adx_sample(fbyte(fr, 0),  fbyte(fr, 1),  fbyte(fr, 2 + int'(i[4:1])),  i[0], a1, a2);
-                    sr = adx_sample(fbyte(fr, 18), fbyte(fr, 19), fbyte(fr, 20 + int'(i[4:1])), i[0], b1, b2);
-                    out_l <= sl;
-                    out_r <= sr;
-                    h1_l <= sl; h2_l <= a1;
-                    h1_r <= sr; h2_r <= b1;
-                    pos <= p + 32'd1;
-                    if (jump || f != cur_f) begin
+                    d_a1 <= a1; d_a2 <= a2; d_b1 <= b1; d_b2 <= b2;
+                    hl = fbyte(fr, 0);
+                    hr = fbyte(fr, 18);
+                    d_scl <= {hl[4:0], fbyte(fr, 1)};
+                    d_scr <= {hr[4:0], fbyte(fr, 19)};
+                    d_nbl <= fbyte(fr, 2 + int'(i[4:1]));
+                    d_nbr <= fbyte(fr, 20 + int'(i[4:1]));
+                    d_odd <= i[0];
+                    pos <= d_p + 32'd1;
+                    if (d_jump || f != cur_f) begin
                         // move to the prefetched (or loop start's) frame; fetch the one after it
                         cur <= fr;
                         cur_f <= f;
@@ -258,20 +271,43 @@ always_ff @(posedge clk) begin
                         mem_addr <= (data_start + 32'd36 * {5'd0, f + 27'd1}) & ~32'd7;
                         fcount <= 0;
                     end
+                    dph <= 2'd2;
                 end
             end
+            2'd2: begin
+                m1l <= 32'(C1) * 32'(d_a1);
+                m2l <= 32'(C2) * 32'(d_a2);
+                mnl <= 32'(nibble(d_nbl, d_odd)) * 32'($signed({2'b00, d_scl}) + 15'sd1);
+                m1r <= 32'(C1) * 32'(d_b1);
+                m2r <= 32'(C2) * 32'(d_b2);
+                mnr <= 32'(nibble(d_nbr, d_odd)) * 32'($signed({2'b00, d_scr}) + 15'sd1);
+                dph <= 2'd3;
+            end
+            2'd3: begin
+                logic signed [15:0] sl, sr;
+                sl = clamp16(((m1l + m2l) >>> 12) + mnl);
+                sr = clamp16(((m1r + m2r) >>> 12) + mnr);
+                out_l <= sl;
+                out_r <= sr;
+                h1_l <= sl; h2_l <= d_a1;
+                h1_r <= sr; h2_r <= d_b1;
+                dph <= 2'd0;
+            end
+            endcase
         end
         default: st <= S_IDLE;
         endcase
 
         if (cmd_stop) begin
             st <= S_IDLE;
+            dph <= 2'd0;
             mem_req <= 0;
             fbusy <= 0;
             out_l <= 0;
             out_r <= 0;
         end
         if (cmd_play) begin
+            dph <= 2'd0;
             mem_addr <= BASE + 32'd8 + {25'd0, cmd_track, 3'd0};
             mem_req <= 1;
             fbusy <= 0;
