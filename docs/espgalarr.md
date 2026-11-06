@@ -49,8 +49,10 @@ not use it.
   a play request while a stream plays fades it out and then starts the new track. All of it is
   bit-exact against PCSX2's SPU2 input (espgalarr spec/lossless-bgm.md).
 - **DDR:** `adx_stream_ddr` is the last leaf of the DDR mux (single-beat reads, about 54 KB/s).
-- **Mix:** each side = the ICS2115's (L + R) / 4 + the BGM x volume / 0x100, saturated; OSD
-  Stereo Mix (status[52:51]). The BGM : SFX balance against the PS2's is still being set.
+- **Mix:** each side = the ICS2115's (L + R) / 4 + the BGM x volume x 286 / 0x10000 (0.5586 at
+  the driver's 0x80), saturated; OSD Stereo Mix (status[52:51]). That gain matches the PS2's
+  BGM : SFX ratio: 4.53 on the board against the PS2's 4.59 over the same no-input stretch of
+  stage 1 (HDMI capture, the BGM separated by its reference decode; PCSX2 SPU2 dump).
 - **Savestates:** slot SSIDX_BGM: the stream's position, histories, fade state and the port
   registers; the frames are fetched again after a restore.
 - **Tests:** sim/adx_tb (Verilator): `make`, `make LOOP_RESTORE=0`, `make LOOP_END_INCL=1`,
@@ -158,4 +160,7 @@ support (it reads the IGS022).
 - **Lossless BGM (2026-11-06):** with the lossless MRA the title track plays after a coin,
   sample-locked to the reference decode (HDMI capture, constant alignment over 33 s; through
   MiSTer's default output filter). The normal (u-law) entry sounds as before on this core.
-- **Not checked yet:** audio over a long run; the lossless BGM's fades and savestates on the board.
+- **Lossless BGM fades and savestates (2026-11-06):** the title fades out over 0.9 s in whole-dB
+  steps when a game starts and stage 1's track follows; a savestate saved while the title plays
+  restores to the saved position and plays on (Alt+F1 / F1); the title loops at its seam.
+- **Not checked yet:** audio over a long run.
