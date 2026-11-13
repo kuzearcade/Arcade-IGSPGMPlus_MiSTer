@@ -20,7 +20,7 @@ import system_consts::*;
 // CPU_ISLAND: the espgalarr 128KB work RAM at 0xe00000 on the 68k's clock.  One write-back
 // ram_cache (512 x 32-byte lines, as the two 256-line caches it replaces) in front of DDR at
 // PROT_SHARE_DDR_BASE (the same layout as espgalarr_xram's two 64KB chips), so a hit answers in
-// the clock after AS.  Misses go to DDR
+// the clock after the island's bus stage sees AS.  Misses go to DDR
 // through ddr_cdc; savestate accesses arrive from the 60 MHz side as toggles (xram_e_ss_bridge)
 // and take the cache port while the 68k is not using it (the system is paused then).
 module xram_e_island (
@@ -28,6 +28,7 @@ module xram_e_island (
     input             reset_sys,        // registered on the 60 MHz side
 
     input             cpu_rd,           // AS asserted, read
+    input             cpu_wr,           // AS asserted, write (the line is fetched from here on)
     input             cpu_we_u,         // DS asserted, write
     input             cpu_we_l,
     input      [16:1] cpu_addr,
@@ -50,9 +51,12 @@ module xram_e_island (
         ss_s    <= { ss_s[0], ss_req_sys };
     end
 
-    wire        cpu_wr = cpu_we_u | cpu_we_l;
+    // (the CPU's signals come from cpu_island's bus stage registers.) A savestate access takes
+    // the port from the clock after it is seen (ss_pend, registered, so that the selection of
+    // the cache's address is not behind a comparison), while the CPU is not using it.
     wire        cpu_on = cpu_rd | cpu_wr;
-    wire        ss_go  = (ss_s[1] != ss_ack) & ~cpu_on;
+    reg         ss_pend = 0;
+    wire        ss_go  = ss_pend & ~cpu_on;
     wire        hi     = ~cpu_addr[1];       // even halfword = bits 31:16 of the 32-bit word
 
     wire        rd_req  = ss_go ? ~ss_wr : cpu_rd;
@@ -64,7 +68,7 @@ module xram_e_island (
     wire [31:0] rd_data;
     wire        rd_ready, wr_ready;
 
-    ram_cache #(.LINES(512)) cache (
+    ram_cache #(.LINES(512), .EARLY_LOOKUP(1)) cache (
         .clk, .reset(reset_s[1]),
         .rd_req, .rd_addr(addr), .rd_data, .rd_ready,
         .wr_req, .wr_addr(addr), .wr_data(wdata), .wr_be(be), .wr_ready,
@@ -78,14 +82,17 @@ module xram_e_island (
     // held for at least the clock in which ready is seen)
     reg ss_busy;
     always_ff @(posedge clk) begin
+        ss_pend <= (ss_s[1] != ss_ack);
         if (reset_s[1]) begin
             ss_busy <= 0;
             ss_ack  <= ss_s[1];
+            ss_pend <= 0;
         end else if (ss_go) begin
             if (ss_busy & rd_ready & wr_ready) begin
                 ss_rdata <= rd_data;
                 ss_ack   <= ss_s[1];
                 ss_busy  <= 0;
+                ss_pend  <= 0;
             end else begin
                 ss_busy <= 1;
             end

@@ -23,7 +23,13 @@
 
 module ram_cache #(
     parameter int    LINES    = 512,
-    parameter [31:0] DDR_BASE = 32'h0      // unused; addresses are full DDR
+    parameter [31:0] DDR_BASE = 32'h0,     // unused; addresses are full DDR
+    // 1: the valid and dirty bits of the requested lines are looked up a clock ahead, at the
+    // address of the previous clock (a hit already needs that address unchanged: rd_stable /
+    // wr_stable; the bits change only on a fill's last beat, after which just_filled holds a
+    // clock, and on a write hit, which only sets the dirty bit of the line it hits). For a
+    // requester whose address leads its request by a clock (cpu_island at 120 MHz).
+    parameter bit    EARLY_LOOKUP = 0
 )(
     input  logic        clk,
     input  logic        reset,
@@ -106,8 +112,19 @@ module ram_cache #(
         .clock_a(clk), .wren_a(tag_we), .address_a(m_idx),  .data_a(m_tag), .q_a(),
         .clock_b(clk), .wren_b(1'b0),   .address_b(wr_idx), .data_b('0),    .q_b(wr_tag_q)
     );
-    wire rd_hit = rd_req & rd_stable & cvalid[rd_idx] & (rd_tag_q == rd_tag);
-    wire wr_hit = wr_req & wr_stable & cvalid[wr_idx] & (wr_tag_q == wr_tag);
+    logic rd_valid_q, wr_valid_q, rd_dirty_q, wr_dirty_q;
+    always_ff @(posedge clk) begin
+        rd_valid_q <= cvalid[rd_idx];
+        wr_valid_q <= cvalid[wr_idx];
+        rd_dirty_q <= cdirty[rd_idx];
+        wr_dirty_q <= cdirty[wr_idx];
+    end
+    wire rd_valid = EARLY_LOOKUP ? rd_valid_q : cvalid[rd_idx];
+    wire wr_valid = EARLY_LOOKUP ? wr_valid_q : cvalid[wr_idx];
+    wire rd_dirty = EARLY_LOOKUP ? rd_dirty_q : cdirty[rd_idx];
+    wire wr_dirty = EARLY_LOOKUP ? wr_dirty_q : cdirty[wr_idx];
+    wire rd_hit = rd_req & rd_stable & rd_valid & (rd_tag_q == rd_tag);
+    wire wr_hit = wr_req & wr_stable & wr_valid & (wr_tag_q == wr_tag);
 
     wire [1:0] m_wbeat = wr_wsel[2:1];
     wire       m_whalf = wr_wsel[0];
@@ -182,13 +199,13 @@ module ram_cache #(
                         m_base  <= {wr_addr[31:OFFB], {OFFB{1'b0}}};
                         v_base  <= {wr_tag_q, wr_idx, {OFFB{1'b0}}};
                         wbw     <= 4'd0; beat <= 2'd0;
-                        state   <= (cvalid[wr_idx] & cdirty[wr_idx]) ? WB_RD : FILL_REQ;
+                        state   <= (wr_valid & wr_dirty) ? WB_RD : FILL_REQ;
                     end else if (rd_req & rd_stable & ~rd_hit & ~just_filled) begin
                         m_write <= 1'b0; m_idx <= rd_idx; m_tag <= rd_tag;
                         m_base  <= {rd_addr[31:OFFB], {OFFB{1'b0}}};
                         v_base  <= {rd_tag_q, rd_idx, {OFFB{1'b0}}};
                         wbw     <= 4'd0; beat <= 2'd0;
-                        state   <= (cvalid[rd_idx] & cdirty[rd_idx]) ? WB_RD : FILL_REQ;
+                        state   <= (rd_valid & rd_dirty) ? WB_RD : FILL_REQ;
                     end
                 end
 

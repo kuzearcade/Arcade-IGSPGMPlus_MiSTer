@@ -21,7 +21,7 @@ module PGM #(
     parameter [63:0] SS_VERSION = 64'd0
 )(
     input             clk_50m,
-    input             clk_cpu,      // CPU_ISLAND: 80 MHz 68k clock (same clock as clk_50m in the sim)
+    input             clk_cpu,      // CPU_ISLAND: 120 MHz 68k clock (same clock as clk_50m in the sim)
     input             reset,
 
     input  game_t     game,
@@ -652,7 +652,7 @@ wire [14:0] isl_xd_addr;
 wire [15:0] isl_xd_d, isl_xd_q;
 wire        isl_xd_we_u_n, isl_xd_we_l_n;
 wire [15:0] isl_nvram_q_word;
-wire        isl_xe_rd, isl_xe_we_u, isl_xe_we_l, isl_xe_ready;
+wire        isl_xe_rd, isl_xe_wr, isl_xe_we_u, isl_xe_we_l, isl_xe_ready;
 wire [16:1] isl_xe_addr;
 wire [15:0] isl_xe_d, isl_xe_q;
 
@@ -703,7 +703,7 @@ cpu_island cpu_island(
     .wram_d(isl_wram_d), .wram_q(isl_wram_q),
     .xd_addr(isl_xd_addr), .xd_we_u_n(isl_xd_we_u_n), .xd_we_l_n(isl_xd_we_l_n),
     .xd_d(isl_xd_d), .xd_q(isl_xd_q),
-    .xe_rd(isl_xe_rd), .xe_we_u(isl_xe_we_u), .xe_we_l(isl_xe_we_l), .xe_addr(isl_xe_addr),
+    .xe_rd(isl_xe_rd), .xe_wr(isl_xe_wr), .xe_we_u(isl_xe_we_u), .xe_we_l(isl_xe_we_l), .xe_addr(isl_xe_addr),
     .xe_d(isl_xe_d), .xe_q(isl_xe_q), .xe_ready(isl_xe_ready),
 
     .nvram_wr_t_sys(nv_wr_t), .nvram_waddr(nv_waddr), .nvram_wdata(nv_wdata),
@@ -1006,7 +1006,7 @@ wire [31:0] xe_ss_wdata, xe_ss_rdata;
 xram_e_island xram_e(
     .clk(clk_cpu),
     .reset_sys(isl_reset_r),
-    .cpu_rd(isl_xe_rd), .cpu_we_u(isl_xe_we_u), .cpu_we_l(isl_xe_we_l),
+    .cpu_rd(isl_xe_rd), .cpu_wr(isl_xe_wr), .cpu_we_u(isl_xe_we_u), .cpu_we_l(isl_xe_we_l),
     .cpu_addr(isl_xe_addr), .cpu_din(isl_xe_d), .cpu_q(isl_xe_q), .cpu_ready(isl_xe_ready),
     .ss_req_sys(xe_ss_req), .ss_wr(xe_ss_wr), .ss_addr(xe_ss_addr), .ss_wdata(xe_ss_wdata),
     .ss_ack(xe_ss_ack), .ss_rdata(xe_ss_rdata),

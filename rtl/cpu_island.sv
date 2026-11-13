@@ -17,8 +17,8 @@
 
 import system_consts::*;
 
-// The 68k in its own clock domain (CPU_ISLAND, the espgalarr core): fx68k on the 80 MHz CPU
-// clock (one phase per clock, 40 MHz), with the memories it uses most on this clock and
+// The 68k in its own clock domain (CPU_ISLAND, the espgalarr core): fx68k on the 120 MHz CPU
+// clock (one phase per clock, 60 MHz), with the memories it uses most on this clock and
 // zero-wait: the program ROM cache (SDRAM behind it), the work RAM at 0x800000 and the
 // 0xd00000 RAM (their CPU ports; the 60 MHz ports serve the sprite DMA and savestates).
 //
@@ -32,14 +32,14 @@ import system_consts::*;
 // false paths (Arcade-IGSPGM.sdc).  The bridge and ROM handshakes use their first synchroniser
 // stage directly: the clocks share a VCO, so the crossing is a timed register-to-register path.
 //
-// Other games keep 20 MHz: the CPU takes a phase every other clock.
+// Other games keep 20 MHz: the CPU takes a phase every third clock.
 module cpu_island (
     input             clk_cpu,
 
     // From the 60 MHz system, synchronised here
     input             reset_sys,        // reset | ss_reset
     input             run_sys,          // clocks_enabled (ss_cpu_execute | ~paused)
-    input             unthrottled,      // static: GAME_ESPGALARR runs at 40 MHz
+    input             unthrottled,      // static: GAME_ESPGALARR runs at 60 MHz
     input             ss_override_sys,
     input       [2:0] ipl_n_sys,
     input             br_n_sys,
@@ -82,6 +82,7 @@ module cpu_island (
 
     // 0xe00000 RAM (xram_e_island: a cache in front of DDR, also on this clock)
     output            xe_rd,
+    output            xe_wr,            // a write cycle, from AS (the strobes follow)
     output            xe_we_u,
     output            xe_we_l,
     output     [16:1] xe_addr,
@@ -119,12 +120,13 @@ wire reset = reset_s[1];
 //////////////////////////////////
 //// Phases
 
-reg ce_phi1, ce_phi2, phase, half;
+reg ce_phi1, ce_phi2, phase;
+reg [1:0] third;
 always_ff @(posedge clk_cpu) begin
     ce_phi1 <= 0;
     ce_phi2 <= 0;
-    half <= ~half;
-    if (run_s[1] && (unthrottled || half)) begin
+    third <= third == 2'd2 ? 2'd0 : third + 2'd1;
+    if (run_s[1] && (unthrottled || third == 2'd0)) begin
         ce_phi1 <= ~phase;
         ce_phi2 <= phase;
         phase <= ~phase;
@@ -166,32 +168,61 @@ fx68k m68000(
 );
 
 //////////////////////////////////
-//// Decode (the same decoder as the system side, on the CPU's own address)
+//// The bus stage: the CPU's outputs and their decode, registered (120 MHz)
+//
+// Everything below runs from this one-clock-old copy of the bus, so no path starts at the CPU's
+// outputs and ends in a memory's write enable. It costs no wait state: fx68k asserts AS on a phi1
+// edge and samples DTACK three clocks later (on the second phi2 after it), and it latches read
+// data on every phi2 until the bus cycle's last state. The 40 MHz island answered a clock
+// earlier than that needed. The address leads AS by at least a clock, so the decode registered
+// with it is that of the cycle's address. (The decode is of the address alone: the selects
+// below add the data strobes, as the address translator's own gating did.)
 
-logic ROMn, WORKRAMn, XRAM_Dn, XRAM_En, SS_SAVEn, SS_RESETn, SS_VECn;
+logic ROMa, WORKRAMa, XRAM_Da, XRAM_Ea, SS_SAVEa, SS_RESETa, SS_VECa;
 
 address_translator address_translator(
     .game,
-    .cpu_ds_n,
+    .cpu_ds_n(2'b00),
     .cpu_word_addr,
     .ss_override(ovr_s[1]),
-    .WORKRAMn, .ROMn, .IOn(), .IGS023n(), .IGS026_Xn(), .IGS025n(), .IGS022_RAMn(),
-    .ARM_SHAREn(), .ARM_LATCHn(), .ARM_NMIn(), .XRAM_Dn, .XRAM_En,
-    .SS_SAVEn, .SS_RESETn, .SS_VECn
+    .WORKRAMn(WORKRAMa), .ROMn(ROMa), .IOn(), .IGS023n(), .IGS026_Xn(), .IGS025n(), .IGS022_RAMn(),
+    .ARM_SHAREn(), .ARM_LATCHn(), .ARM_NMIn(), .XRAM_Dn(XRAM_Da), .XRAM_En(XRAM_Ea),
+    .SS_SAVEn(SS_SAVEa), .SS_RESETn(SS_RESETa), .SS_VECn(SS_VECa)
 );
 
-wire iack      = &cpu_fc;
-wire ss_region = ~SS_SAVEn | ~SS_RESETn | ~SS_VECn;
-wire rom_sel   = ~ROMn & ~ss_region & ~iack;
-wire wram_sel  = ~WORKRAMn & ~ss_region & ~iack;
-wire xd_sel    = ~XRAM_Dn & ~ss_region & ~iack;
-wire xe_sel    = ~XRAM_En & ~ss_region & ~iack;
+reg  [22:0] b_addr;
+reg         b_as_n = 1, b_rw = 1;
+reg   [1:0] b_ds_n = 2'b11;
+reg   [2:0] b_fc;
+reg  [15:0] b_dout;
+reg         b_rom, b_wram, b_xd, b_xe, b_iack;
+always_ff @(posedge clk_cpu) begin
+    b_addr <= cpu_addr;
+    b_as_n <= cpu_as_n;
+    b_ds_n <= cpu_ds_n;
+    b_rw   <= cpu_rw;
+    b_fc   <= cpu_fc;
+    b_dout <= cpu_data_out;
+    b_iack <= &cpu_fc;
+    // the selects, less the strobes: not in a savestate region, not an interrupt acknowledge
+    b_rom  <= ~ROMa     & SS_SAVEa & SS_RESETa & SS_VECa & ~&cpu_fc;
+    b_wram <= ~WORKRAMa & SS_SAVEa & SS_RESETa & SS_VECa & ~&cpu_fc;
+    b_xd   <= ~XRAM_Da  & SS_SAVEa & SS_RESETa & SS_VECa & ~&cpu_fc;
+    b_xe   <= ~XRAM_Ea  & SS_SAVEa & SS_RESETa & SS_VECa & ~&cpu_fc;
+end
+
+wire ds_low    = ~&b_ds_n;
+wire iack      = b_iack;
+wire rom_sel   = b_rom & ds_low;
+wire wram_sel  = b_wram & ds_low;
+wire xd_sel    = b_xd & ds_low;
+wire xe_sel    = b_xe & ds_low;
 wire fast      = rom_sel | wram_sel | xd_sel | xe_sel;
-wire ds_low    = ~&cpu_ds_n;
 
 //////////////////////////////////
-//// Program ROM cache: 2048 x 8-byte lines, direct mapped, looked up every clock so that a hit
-//// answers in the clock after AS (zero wait states)
+//// Program ROM cache: 2048 x 8-byte lines, direct mapped. The line and tag are read at the CPU's
+//// own address, so they arrive with the bus stage's copy of it: a hit answers in the clock after
+//// the bus stage sees AS (zero wait states)
 
 localparam CACHE_WIDTH = 11;
 reg  [1:0]  version;
@@ -199,14 +230,14 @@ reg  [63:0] cache_data[2**CACHE_WIDTH];
 reg  [11:0] cache_tag[2**CACHE_WIDTH];      // { version, address bits 22:13 }
 reg  [63:0] cache_line;
 reg  [11:0] cached_tag;
-reg  [22:0] addr_q;                         // the address cache_line/cached_tag were read for
 
 wire [CACHE_WIDTH-1:0] index   = cpu_addr[CACHE_WIDTH+1:2];
-wire [11:0]            tag_of  = { version, addr_q[22:13] };
-wire                   rom_hit = (cached_tag == tag_of) && (addr_q == cpu_addr);
-wire [15:0] rom_word = addr_q[1:0] == 2'd0 ? cache_line[15:0]  :
-                       addr_q[1:0] == 2'd1 ? cache_line[31:16] :
-                       addr_q[1:0] == 2'd2 ? cache_line[47:32] : cache_line[63:48];
+wire [CACHE_WIDTH-1:0] b_index = b_addr[CACHE_WIDTH+1:2];
+wire [11:0]            tag_of  = { version, b_addr[22:13] };
+wire                   rom_hit = (cached_tag == tag_of);
+wire [15:0] rom_word = b_addr[1:0] == 2'd0 ? cache_line[15:0]  :
+                       b_addr[1:0] == 2'd1 ? cache_line[31:16] :
+                       b_addr[1:0] == 2'd2 ? cache_line[47:32] : cache_line[63:48];
 
 typedef enum bit [1:0] { RC_IDLE, RC_REQ, RC_WAIT, RC_SETTLE } rc_state_t;
 rc_state_t rc_state = RC_IDLE;
@@ -218,7 +249,6 @@ reg        prev_reset;
 always_ff @(posedge clk_cpu) begin
     cache_line <= cache_data[index];
     cached_tag <= cache_tag[index];
-    addr_q     <= cpu_addr;
     sdr_ack_s  <= { sdr_ack_s[0], sdr_ack };
     prev_reset <= reset;
 
@@ -227,13 +257,13 @@ always_ff @(posedge clk_cpu) begin
         if (~prev_reset) version <= version + 2'd1;
     end else begin
         case (rc_state)
-            RC_IDLE: if (rom_sel && ~cpu_as_n && addr_q == cpu_addr && ~rom_hit) begin
+            RC_IDLE: if (rom_sel && ~b_as_n && ~rom_hit) begin
                 // the address goes out a clock before the request toggles
-                if (cart_present && (cpu_addr >= cart_base_addr))
-                    sdr_addr <= CART_PROG_ROM_SDR_BASE[26:0] + { 3'b0, cpu_addr[22:2] - cart_base_addr[22:2], 3'b000 };
+                if (cart_present && (b_addr >= cart_base_addr))
+                    sdr_addr <= CART_PROG_ROM_SDR_BASE[26:0] + { 3'b0, b_addr[22:2] - cart_base_addr[22:2], 3'b000 };
                 else
-                    sdr_addr <= BIOS_PROG_ROM_SDR_BASE[26:0] + { 3'b0, cpu_addr[22:2], 3'b000 };
-                fill_index <= index;
+                    sdr_addr <= BIOS_PROG_ROM_SDR_BASE[26:0] + { 3'b0, b_addr[22:2], 3'b000 };
+                fill_index <= b_index;
                 fill_tag   <= tag_of;
                 rc_state   <= RC_REQ;
             end
@@ -254,15 +284,15 @@ end
 //////////////////////////////////
 //// Work RAM and 0xd00000 RAM ports; the work RAM port serves NVRAM while the CPU is elsewhere
 
-wire cpu_wram = ~cpu_as_n & wram_sel;
+wire cpu_wram = ~b_as_n & wram_sel;
 reg  nvw_seen, nv_rd_d;
 reg  [16:0] nv_rd_addr_d;
 wire nv_write = ~cpu_wram & (nvw_s[1] != nvw_seen);
 
-assign wram_addr   = cpu_wram ? cpu_addr[15:0] : nv_write ? nvram_waddr[16:1] : nvram_raddr[16:1];
-assign wram_d      = cpu_wram ? cpu_data_out : { nvram_wdata, nvram_wdata };
-assign wram_we_u_n = cpu_wram ? (cpu_rw | cpu_ds_n[1]) : ~(nv_write & nvram_waddr[0]);   // odd NVRAM byte = D15:8
-assign wram_we_l_n = cpu_wram ? (cpu_rw | cpu_ds_n[0]) : ~(nv_write & ~nvram_waddr[0]);
+assign wram_addr   = cpu_wram ? b_addr[15:0] : nv_write ? nvram_waddr[16:1] : nvram_raddr[16:1];
+assign wram_d      = cpu_wram ? b_dout : { nvram_wdata, nvram_wdata };
+assign wram_we_u_n = cpu_wram ? (b_rw | b_ds_n[1]) : ~(nv_write & nvram_waddr[0]);   // odd NVRAM byte = D15:8
+assign wram_we_l_n = cpu_wram ? (b_rw | b_ds_n[0]) : ~(nv_write & ~nvram_waddr[0]);
 
 always_ff @(posedge clk_cpu) begin
     if (nv_write) nvw_seen <= nvw_s[1];
@@ -271,16 +301,19 @@ always_ff @(posedge clk_cpu) begin
     if (nv_rd_d && nv_rd_addr_d == nvram_raddr) nvram_q_word <= wram_q;
 end
 
-assign xe_rd     = ~cpu_as_n & xe_sel & cpu_rw;
-assign xe_we_u   = ~cpu_as_n & xe_sel & ~cpu_rw & ~cpu_ds_n[1];
-assign xe_we_l   = ~cpu_as_n & xe_sel & ~cpu_rw & ~cpu_ds_n[0];
-assign xe_addr   = cpu_addr[15:0];
-assign xe_d      = cpu_data_out;
+// 0xe00000: a write asks the cache for its line from AS on (with no byte enables until the
+// strobes come), so the line is there when they do, as the 40 MHz island's write was
+assign xe_rd     = ~b_as_n & xe_sel & b_rw;
+assign xe_wr     = ~b_as_n & b_xe & ~b_rw;
+assign xe_we_u   = ~b_as_n & xe_sel & ~b_rw & ~b_ds_n[1];
+assign xe_we_l   = ~b_as_n & xe_sel & ~b_rw & ~b_ds_n[0];
+assign xe_addr   = b_addr[15:0];
+assign xe_d      = b_dout;
 
-assign xd_addr   = cpu_addr[14:0];
-assign xd_d      = cpu_data_out;
-assign xd_we_u_n = ~(~cpu_as_n & xd_sel) | cpu_rw | cpu_ds_n[1];
-assign xd_we_l_n = ~(~cpu_as_n & xd_sel) | cpu_rw | cpu_ds_n[0];
+assign xd_addr   = b_addr[14:0];
+assign xd_d      = b_dout;
+assign xd_we_u_n = ~(~b_as_n & xd_sel) | b_rw | b_ds_n[1];
+assign xd_we_l_n = ~(~b_as_n & xd_sel) | b_rw | b_ds_n[0];
 
 //////////////////////////////////
 //// Slow path
@@ -290,34 +323,34 @@ reg pending, done;
 reg [15:0] bridge_din_r;
 
 always_ff @(posedge clk_cpu) begin
-    ds_low_d <= ds_low & ~cpu_as_n;
-    as_n_d   <= cpu_as_n;
+    ds_low_d <= ds_low & ~b_as_n;
+    as_n_d   <= b_as_n;
 
     if (reset) begin
         pending <= 0;
         done <= 0;
     end else begin
         // a new data strobe (reads: with AS; writes: two phases later; TAS: once per half)
-        if (~cpu_as_n & ds_low & ~ds_low_d & ~fast & ~pending) begin
-            bridge_addr <= cpu_addr;
-            bridge_ds_n <= cpu_ds_n;
-            bridge_rw   <= cpu_rw;
-            bridge_fc   <= cpu_fc;
-            bridge_dout <= cpu_data_out;
+        if (~b_as_n & ds_low & ~ds_low_d & ~fast & ~pending) begin
+            bridge_addr <= b_addr;
+            bridge_ds_n <= b_ds_n;
+            bridge_rw   <= b_rw;
+            bridge_fc   <= b_fc;
+            bridge_dout <= b_dout;
             bridge_req  <= ~bridge_req;
             pending     <= 1;
             done        <= 0;
         end else if (pending & ~done & (ack_s[0] == bridge_req)) begin
             done <= 1;
             bridge_din_r <= bridge_din;
-        end else if (pending & done & (cpu_as_n | ~ds_low)) begin
+        end else if (pending & done & (b_as_n | ~ds_low)) begin
             pending <= 0;
             done    <= 0;
         end
     end
 
     // a supervisor program read from the ROM cache, for the savestate sequencer
-    if (as_n_d & ~cpu_as_n & rom_sel & cpu_rw & (cpu_fc == 3'b110)) sv_fetch <= ~sv_fetch;
+    if (as_n_d & ~b_as_n & rom_sel & b_rw & (b_fc == 3'b110)) sv_fetch <= ~sv_fetch;
 end
 
 //////////////////////////////////
@@ -330,8 +363,8 @@ always_ff @(posedge clk_cpu) begin
                  xe_sel   ? xe_q :
                             bridge_din_r;
 
-    dtack_n_r <= ~(~cpu_as_n & ((rom_sel & rom_hit) | wram_sel | xd_sel | (xe_sel & ds_low & xe_ready) | (~fast & ~iack & pending & done)));
-    vpa_n_r   <= ~(~cpu_as_n & iack & pending & done);
+    dtack_n_r <= ~(~b_as_n & ((rom_sel & rom_hit) | wram_sel | xd_sel | (xe_sel & xe_ready) | (~fast & ~iack & pending & done)));
+    vpa_n_r   <= ~(~b_as_n & iack & pending & done);
 end
 
 endmodule

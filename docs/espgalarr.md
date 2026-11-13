@@ -85,19 +85,26 @@ protected games will not run on this RBF. The sprite line-buffer queue is 1024 e
 Quartus 17.0 fit, 2026-11-05: 25,756 / 41,910 ALMs (61%) and 553 / 553 RAM blocks. Timing
 was met on every clock (worst setup slack +0.464 ns).
 
-## Clocks: 60 MHz system, 40 MHz 68k in its own domain (espgalarr only)
+## Clocks: 60 MHz system, 60 MHz 68k in its own domain (espgalarr only)
 
 The arcade 68k (20 MHz) overruns its frame in busy scenes: MAME lags 23-38% of the frames in
 stages 2-6, the PS2 0.6-1.8%. The game paces itself on vblank, so a faster 68k only removes
 those lag frames; the logic per step is unchanged (MAME with the 68k scaled 1.5x and 2x gives
 the same bullet samples in stages 3-6 as at 1x).
 
-- **PLL:** SDRAM 120 MHz, system (clk_sys) 60 MHz, CPU (clk_cpu) 80 MHz, all from one VCO.
+- **PLL:** SDRAM 120 MHz, system (clk_sys) 60 MHz, CPU (clk_cpu) 120 MHz, all from one VCO.
+  clk_cpu has the SDRAM clock's frequency and phase, and the fitter merges the two output
+  counters (general[0]); the sdc finds the CPU clock under either name.
 - **ce_50m:** a 50 MHz enable (5 clocks in 6) that every system timing is derived from: pixel
   clock, ICS2115, Z80, RTC, the IGS027A.
 - **CPU_ISLAND (rtl/cpu_island.sv, qsf macro):**
-  - **Clocking:** fx68k runs on clk_cpu, one phase per clock, so the 68k is at 40 MHz. Other
-    games take a phase every other clock (20 MHz).
+  - **Clocking:** fx68k runs on clk_cpu, one phase per clock, so the 68k is at 60 MHz. Other
+    games take a phase every third clock (20 MHz).
+  - **Bus stage:** the memories run from a registered copy of the CPU's bus outputs and of
+    their address decode, one clock old, so no path runs from fx68k into a write enable. It
+    costs no wait state: fx68k samples DTACK three clocks after AS and latches read data until
+    the cycle's last phi2, and the 40 MHz island answered a clock earlier than needed. The
+    bridge starts a clock later (2 clocks more per I/O or video access).
   - **Fast memories on the CPU clock, zero-wait on a hit:**
     - The program ROM cache (2048 x 8-byte lines, looked up every clock, SDRAM channel 3
       behind it).
@@ -105,6 +112,10 @@ the same bullet samples in stages 3-6 as at 1x).
       per port. Their 60 MHz ports serve the sprite DMA and savestates.
     - The 0xe00000 RAM's write-back cache (rtl/xram_e_island.sv: one ram_cache, 512 x 32-byte
       lines). Its misses reach DDR through ddr_cdc; savestate accesses cross as toggles.
+      At 120 MHz the cache looks up its valid and dirty bits a clock ahead (ram_cache
+      EARLY_LOOKUP), and a write asks for its line from AS on, with no byte enables until the
+      strobes come, so a write hit still answers in time. Read misses take 2 clocks more
+      and write misses 2 fewer than at 40 MHz.
   - **NVRAM:** loads and saves use the work RAM's CPU port in the clocks the CPU leaves free.
   - **Bridge for every other access:** a request toggle carries the bus cycle to the 60 MHz
     side, which replays it as a 68k bus cycle (the cpu_* signals in PGM.sv). So the IGS023, I/O,
@@ -119,8 +130,13 @@ the same bullet samples in stages 3-6 as at 1x).
     ROM-cache fetches, which the CPU signals with `sv_fetch`.
 - **SDRAM controller:** 3 clocks ACTIVE->READ/WRITE (tRCD); 7 clocks READ->ACTIVE (tRP after
   the auto-precharge); 6 clocks WRITE->ACTIVE; 9 clocks REFRESH->ACTIVE (tRFC).
-- **Fit (2026-11-05):** timing met in every corner (worst setup +0.13 ns on clk_cpu), 553/553
+- **Fit (2026-11-05, 40 MHz 68k):** timing met (worst setup +0.13 ns on clk_cpu), 553/553
   RAM blocks, 60% ALMs.
+- **Fit (2026-11-13, 60 MHz 68k):** timing met (slow 100C model; worst setup +0.121 ns on the
+  120 MHz clock, hold +0.233 ns), 553/553 RAM blocks, 66% ALMs. At 120 MHz without the bus
+  stage, fx68k's own paths met timing (worst ~9.5 ns at 80 MHz, within 8.33 ns when pushed);
+  the failures were the paths from its address and strobes into the RAMs' write enables (up
+  to -1.1 ns).
 
 **Measured speed.** One full attract cycle (three demos and the logo screens), MAME with the
 68k scaled vs the board (one screenshot a second, 13-14 cycles):
@@ -136,6 +152,15 @@ the same bullet samples in stages 3-6 as at 1x).
 The demos barely lag above 1.75x, so this test cannot tell 1.8x from 2x. MAME lag by stage: at 1.5x stages 2-6 lag 2.9 / 4.0 / 10.1 / 9.4 / 10.5% of
 the frames; at 2x 1.0 / 1.7 / 6.2 / 3.9 / 4.1%.
 
+**Island testbench (sim/island_tb).** fx68k and the island's memories on one clock, with the
+real xram_e_island / ram_cache / ddr_cdc and models of the SDRAM, DDR and the bridge; a test
+program (mkprog.py, built with the espgalarr tool's 68k assembler) works the ROM cache (a 32KB
+table), the work RAM, 0xd00000, 0xe00000 (misses and writebacks), the bridge, TAS and MOVEM,
+under a timer interrupt. `make run` builds the 40 MHz island (the espgalarr branch) and the
+working tree's, and compares their bus logs. The 60 MHz island gives the same checksums at
+SDRAM/DDR latencies from 1 to 40 clocks, and, without interrupts, the same clocks for every ROM,
+work RAM, 0xd00000 and 0xe00000-hit cycle (209,868 ROM reads); bridge cycles take 2 clocks more.
+
 The sim does not build the island: CPU_ISLAND needs ESPGALARR_CORE, which the sim's C++ does not
 support (it reads the IGS022).
 
@@ -148,6 +173,7 @@ support (it reads the IGS022).
   boss and its parts. In the busy opening stretch the HUD disappears in some screenshots; MAME
   running the same ROM hides it in the same scenes, so this is the game's own behaviour.
 - **40 MHz island core:** boots and runs the attract loop (above for its speed) and a game.
+- **60 MHz island core (2026-11-13):** not yet run on the board (the board was offline).
 - **Sound:** the 60 MHz builds before the ICS2115 enable fix were silent (HDMI capture RMS 0;
   the 20 MHz core and the fixed build about 1600 in the attract demo). The ICS2115 had to run on
   every clock, not on ce_50m.
