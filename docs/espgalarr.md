@@ -173,7 +173,16 @@ support (it reads the IGS022).
   boss and its parts. In the busy opening stretch the HUD disappears in some screenshots; MAME
   running the same ROM hides it in the same scenes, so this is the game's own behaviour.
 - **40 MHz island core:** boots and runs the attract loop (above for its speed) and a game.
-- **60 MHz island core (2026-11-13):** not yet run on the board (the board was offline).
+- **60 MHz island core (2026-11-13, IGSPGMPlus60 + espgalarr build m325):**
+  - **Boot and play:** boots to the attract demo; coin, start, character select and stage 1
+    play. Sound in the demo and in play (HDMI capture RMS 1300-3400).
+  - **Savestates:** Alt+F1 writes the .ss (439,920 bytes, as the 40 MHz core's); 8 s later
+    (game over) F1 brings back the saved scene, and the game runs on from it, with sound.
+  - **NVRAM:** "Save Backup RAM" writes the 128KB .nvm (the work RAM: it holds the allocator
+    burst cursor 0x00d00d80 at 0x818358). Loading: the game clears most of the work RAM at
+    boot (in MAME too), but keeps 0x800a00-0x800fff and 0x81f40c-0x81fedb, among others;
+    markers written there in the .nvm came back unchanged in the next save after a reboot
+    of the core (and in MAME after 60 s of attract).
 - **Sound:** the 60 MHz builds before the ICS2115 enable fix were silent (HDMI capture RMS 0;
   the 20 MHz core and the fixed build about 1600 in the attract demo). The ICS2115 had to run on
   every clock, not on ce_50m.
