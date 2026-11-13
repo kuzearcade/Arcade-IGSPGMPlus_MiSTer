@@ -1,7 +1,7 @@
 <misterromdescription>
 	<name>Espgaluda Arrange (ESP Ra.De. characters)</name>
 	<!-- espgalarr_esprade.zip: the tool's `espgalarr build --esprade-chars` (J-B 5th as Black,
-	     Irori as Chihiro; needs esprade.zip), its espgalarr.zip renamed -->
+	     Irori as Chihiro; needs esprade.zip), written as out_esprade/espgalarr_esprade.zip -->
 	<setname>espgalarr</setname>
 	<rbf>IGSPGMPlus</rbf>
 	<rotation>vertical</rotation>
