@@ -1,7 +1,7 @@
 <misterromdescription>
 	<name>Espgaluda Arrange (ESP Ra.De. characters)</name>
-	<!-- espgalarr_esprade.zip: the tool's `espgalarr build --esprade-chars` (J-B 5th as Black,
-	     Irori as Chihiro; needs esprade.zip), written as out_esprade/espgalarr_esprade.zip -->
+	<!-- espgalarrade.zip: the tool's `espgalarr build --esprade-chars` (J-B 5th as Black,
+	     Irori as Chihiro; needs esprade.zip), written as out_rade/espgalarrade.zip -->
 	<setname>espgalarr</setname>
 	<rbf>IGSPGMPlus</rbf>
 	<rotation>vertical</rotation>
@@ -17,7 +17,7 @@
 		<dip name="Unused 2" bits="6" ids="On,Off"/>
 		<dip name="Debug" bits="7" ids="On,Off"/>
 	</switches>
-	<rom index="0" address="0x30000000" zip="espgalarr_esprade.zip">
+	<rom index="0" address="0x30000000" zip="espgalarrade.zip">
 		<!-- SYSTEM INFO (game = GAME_ESPGALARR = 30): plain prog, RAM at 0xd00000 / 0xe00000,
 		     extended sprite list at 0xd0c840 -->
 		<part>1e 00</part>
@@ -57,7 +57,7 @@
 	</rom>
 	<!-- the Arrange soundtrack: the PS2's ADX streams (espgalarr build --bgm adx), placed by
 	     Main_MiSTer straight into DDR3 for the core's stream player (rtl/adx_stream.sv) -->
-	<rom index="2" address="0x34000000" zip="espgalarr_esprade.zip">
+	<rom index="2" address="0x34000000" zip="espgalarrade.zip">
 		<part name="espgalarr_bgm.bin" crc="8d4dbf32"/>
 	</rom>
 	<nvram index="8" size="131072"/>
