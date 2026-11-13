@@ -7,7 +7,7 @@ replaces the stock PGM core:
 
 - RBF: `IGSPGMPlus_<date>.rbf` in `_Arcade/cores` (the stock core is `IGSPGM_<date>.rbf`).
 - Core name `IGSPGMPlus` (CONF_STR), so settings, NVRAM and savestates are kept apart.
-- MRA: `releases/espgalarr/Espgaluda Arrange (espgalarr conversion).mra`, `<rbf>IGSPGMPlus</rbf>`,
+- MRA: `releases/espgalarr/Espgaluda Arrange (PS2 conversion).mra`, `<rbf>IGSPGMPlus</rbf>`,
   ROMs from `espgalarr.zip` (the tool's `dropin/espgalarr.zip`).
 - Current release: `IGSPGMPlus_20261113.rbf`, the 68k at 60 MHz (see Clocks; the previous release,
   `IGSPGMPlus_20261106.rbf`, ran it at 40 MHz).

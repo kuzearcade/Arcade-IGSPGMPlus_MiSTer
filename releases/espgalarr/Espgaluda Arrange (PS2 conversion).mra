@@ -1,5 +1,5 @@
 <misterromdescription>
-	<name>Espgaluda Arrange (espgalarr conversion)</name>
+	<name>Espgaluda Arrange (PS2 conversion)</name>
 	<setname>espgalarr</setname>
 	<rbf>IGSPGMPlus</rbf>
 	<rotation>vertical</rotation>
@@ -22,41 +22,41 @@
 
 		<!-- BIOS PROG -->
 		<part>00 00020000 00000000</part>
-		<part name="pgm_p02s.u20"/>
+		<part name="pgm_p02s.u20" crc="78c15fa2"/>
 
 		<!-- BIOS TILE -->
 		<part>01 00200000 00000000</part>
-		<part name="pgm_t01s.rom"/>
+		<part name="pgm_t01s.rom" crc="1a7123a0"/>
 
 		<!-- BIOS MUSIC -->
 		<part>02 00200000 00000000</part>
-		<part name="pgm_m01s.rom"/>
+		<part name="pgm_m01s.rom" crc="45ae7159"/>
 
 		<!-- CART PROG (4 MB, plain) -->
 		<part>03 00400000 00000000</part>
-		<part name="espgaluda_u8.bin"/>
+		<part name="espgaluda_u8.bin" crc="8d3927bc"/>
 
 		<!-- CART TILE -->
 		<part>04 00800000 00180000</part>
-		<part name="cave_t04801w064.u19"/>
+		<part name="cave_t04801w064.u19" crc="6021c79e"/>
 
 		<!-- CART MUSIC (12 MB, ICS @0x400000: original SFX + the Arrange voices) -->
 		<part>05 00c00000 00400000</part>
-		<part name="cave_w04801b032.u17"/>
+		<part name="cave_w04801b032.u17" crc="b4385df5"/>
 
 		<!-- A ROM (sprite colour) -->
 		<part>06 01000000 00000000</part>
-		<part name="cave_a04801w064.u7"/>
-		<part name="cave_a04802w064.u8"/>
+		<part name="cave_a04801w064.u7" crc="26dd4932"/>
+		<part name="cave_a04802w064.u8" crc="2c65e9d6"/>
 
 		<!-- B ROM (sprite mask) -->
 		<part>07 00800000 00000000</part>
-		<part name="cave_b04801w064.u1"/>
+		<part name="cave_b04801w064.u1" crc="3a09e3c5"/>
 	</rom>
 	<!-- the Arrange soundtrack: the PS2's ADX streams (espgalarr build --bgm adx), placed by
 	     Main_MiSTer straight into DDR3 for the core's stream player (rtl/adx_stream.sv) -->
 	<rom index="2" address="0x34000000" zip="espgalarr.zip">
-		<part name="espgalarr_bgm.bin"/>
+		<part name="espgalarr_bgm.bin" crc="8d4dbf32"/>
 	</rom>
 	<nvram index="8" size="131072"/>
 </misterromdescription>
